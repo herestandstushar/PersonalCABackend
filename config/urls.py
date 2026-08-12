@@ -13,6 +13,8 @@ from drf_spectacular.views import (
     SpectacularSwaggerView,
 )
 
+from core.health import healthz
+
 api_v1_patterns = [
     path("auth/", include("authentication.urls")),
     path("users/", include("users.urls")),
@@ -33,6 +35,7 @@ api_v1_patterns = [
 ]
 
 urlpatterns = [
+    path("healthz/", healthz, name="healthz"),
     path("admin/", admin.site.urls),
     # API v1
     path("api/v1/", include(api_v1_patterns)),

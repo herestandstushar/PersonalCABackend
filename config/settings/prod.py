@@ -6,6 +6,12 @@ from .base import *  # noqa: F401, F403
 
 DEBUG = False
 
+# Render injects RENDER_EXTERNAL_HOSTNAME — auto-allow it so a missing
+# DJANGO_ALLOWED_HOSTS env var does not 400 every request / health check.
+_render_host = env("RENDER_EXTERNAL_HOSTNAME", default="")  # noqa: F405
+if _render_host and _render_host not in ALLOWED_HOSTS:  # noqa: F405
+    ALLOWED_HOSTS = list(ALLOWED_HOSTS) + [_render_host, ".onrender.com"]  # noqa: F405
+
 # Render (and most PaaS) terminate TLS at the proxy and forward HTTP internally.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_X_FORWARDED_HOST = True

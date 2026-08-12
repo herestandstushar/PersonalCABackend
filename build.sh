@@ -5,6 +5,7 @@ set -o errexit
 pip install --upgrade pip
 pip install -r requirements/prod.txt
 
-# Collect static assets for WhiteNoise. Migrations run in the release / start
-# command so a failed migrate cannot leave a half-built slug.
+export DJANGO_SETTINGS_MODULE="${DJANGO_SETTINGS_MODULE:-config.settings.prod}"
+
+# collectstatic must not require a live database.
 python manage.py collectstatic --no-input
