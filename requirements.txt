@@ -1,0 +1,2 @@
+# Install production dependencies (used by Render and other PaaS defaults).
+-r requirements/prod.txt

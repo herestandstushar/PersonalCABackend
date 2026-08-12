@@ -5,7 +5,6 @@ Shared configuration for all environments. Environment-specific settings
 (dev.py, prod.py) import from this file and override as needed.
 """
 
-import os
 from datetime import timedelta
 from pathlib import Path
 
@@ -16,7 +15,11 @@ import environ
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 env = environ.Env()
-environ.Env.read_env(os.path.join(BASE_DIR.parent, ".env"), overwrite=True)
+# Load a local .env when present (monorepo root or backend root). On Render the
+# platform injects env vars directly — missing files must not crash startup.
+for _env_path in (BASE_DIR / ".env", BASE_DIR.parent / ".env"):
+    if _env_path.is_file():
+        environ.Env.read_env(str(_env_path), overwrite=True)
 
 # ---------------------------------------------------------------------------
 # Core
@@ -204,12 +207,20 @@ CORS_ALLOWED_ORIGINS = env.list(
     "CORS_ALLOWED_ORIGINS", default=["http://localhost:3000"]
 )
 CORS_ALLOW_CREDENTIALS = True
+# Needed when the SPA on Vercel posts to the API (admin / session cookies).
+CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=CORS_ALLOWED_ORIGINS)
 
 # ---------------------------------------------------------------------------
-# Celery
+# Celery / Redis
 # ---------------------------------------------------------------------------
-CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="redis://localhost:6379/1")
-CELERY_RESULT_BACKEND = env("REDIS_URL", default="redis://localhost:6379/0")
+# REDIS_URL is optional. Empty → in-memory cache so Render free tier works
+# without a Redis addon. Celery tasks simply won't run until a broker is set.
+REDIS_URL = env("REDIS_URL", default="")
+CELERY_BROKER_URL = env(
+    "CELERY_BROKER_URL",
+    default=REDIS_URL or "redis://localhost:6379/1",
+)
+CELERY_RESULT_BACKEND = REDIS_URL or "cache+memory://"
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
@@ -217,14 +228,22 @@ CELERY_TIMEZONE = "UTC"
 CELERY_TASK_TRACK_STARTED = True
 
 # ---------------------------------------------------------------------------
-# Redis Cache
+# Cache
 # ---------------------------------------------------------------------------
-CACHES = {
-    "default": {
-        "BACKEND": "django.core.cache.backends.redis.RedisCache",
-        "LOCATION": env("REDIS_URL", default="redis://localhost:6379/0"),
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+        }
     }
-}
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "finsight-default",
+        }
+    }
 
 # ---------------------------------------------------------------------------
 # DRF Spectacular (Swagger)
