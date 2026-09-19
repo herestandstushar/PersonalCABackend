@@ -203,6 +203,81 @@ class AccountService:
             return ""
 
     @staticmethod
+    @transaction.atomic
+    def reset_account(user, account_id) -> dict:
+        """
+        Clear transaction/statement history for one account and zero its balance.
+        Account itself is kept so it can be re-imported cleanly.
+        """
+        from django.db.models import Q
+        from django.utils import timezone
+        from statements.models import Statement
+        from transactions.models import Transaction
+
+        account = AccountService.get_account(user, account_id)
+        now = timezone.now()
+
+        txn_qs = Transaction.objects.filter(user=user).filter(
+            Q(account=account) | Q(to_account=account)
+        )
+        transactions_cleared = txn_qs.count()
+        txn_qs.update(is_deleted=True, updated_at=now)
+
+        stmt_qs = Statement.objects.filter(user=user, account=account)
+        statements_cleared = stmt_qs.count()
+        stmt_qs.update(is_deleted=True, updated_at=now)
+
+        account.current_balance = Decimal("0.00")
+        account.save(update_fields=["current_balance", "updated_at"])
+
+        logger.info(
+            "Account reset: %s (%s txns, %s stmts) for user %s",
+            account.name,
+            transactions_cleared,
+            statements_cleared,
+            user.email,
+        )
+        return {
+            "accounts_reset": 1,
+            "transactions_cleared": transactions_cleared,
+            "statements_cleared": statements_cleared,
+        }
+
+    @staticmethod
+    @transaction.atomic
+    def reset_all_accounts(user) -> dict:
+        """Clear history for every account owned by the user."""
+        from django.utils import timezone
+        from statements.models import Statement
+        from transactions.models import Transaction
+
+        now = timezone.now()
+        accounts = Account.objects.filter(user=user)
+        accounts_reset = accounts.count()
+
+        txn_qs = Transaction.objects.filter(user=user)
+        transactions_cleared = txn_qs.count()
+        txn_qs.update(is_deleted=True, updated_at=now)
+
+        stmt_qs = Statement.objects.filter(user=user)
+        statements_cleared = stmt_qs.count()
+        stmt_qs.update(is_deleted=True, updated_at=now)
+
+        accounts.update(current_balance=Decimal("0.00"), updated_at=now)
+
+        logger.info(
+            "All accounts reset (%s accounts, %s txns) for user %s",
+            accounts_reset,
+            transactions_cleared,
+            user.email,
+        )
+        return {
+            "accounts_reset": accounts_reset,
+            "transactions_cleared": transactions_cleared,
+            "statements_cleared": statements_cleared,
+        }
+
+    @staticmethod
     def delete_account(user, account_id):
         """Soft-delete an account."""
         account = AccountService.get_account(user, account_id)

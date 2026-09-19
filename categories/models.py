@@ -70,15 +70,15 @@ class Category(BaseModel):
 # Default system categories — seeded via data migration
 SYSTEM_CATEGORIES = [
     # Expenses
-    {"name": "Food & Dining", "icon": "utensils", "color": "#f97316", "category_type": "expense", "keywords": ["restaurant", "food", "dining", "cafe", "coffee"]},
+    {"name": "Food & Dining", "icon": "utensils", "color": "#f97316", "category_type": "expense", "keywords": ["restaurant", "food", "dining", "cafe", "coffee", "bikanervala", "connaught", "swiggy", "zomato"]},
     {"name": "Groceries", "icon": "shopping-cart", "color": "#22c55e", "category_type": "expense", "keywords": ["grocery", "supermarket", "mart", "vegetables", "fruits"]},
-    {"name": "Fuel", "icon": "fuel", "color": "#ef4444", "category_type": "expense", "keywords": ["petrol", "diesel", "fuel", "gas station", "petroleum"]},
+    {"name": "Fuel", "icon": "fuel", "color": "#ef4444", "category_type": "expense", "keywords": ["petrol", "diesel", "fuel", "gas station", "petroleum", "bp petrol", "best fuel"]},
     {"name": "Travel", "icon": "plane", "color": "#3b82f6", "category_type": "expense", "keywords": ["flight", "hotel", "travel", "booking", "airline", "train", "cab", "uber", "ola"]},
-    {"name": "Shopping", "icon": "shopping-bag", "color": "#a855f7", "category_type": "expense", "keywords": ["amazon", "flipkart", "shopping", "myntra", "mall"]},
+    {"name": "Shopping", "icon": "shopping-bag", "color": "#a855f7", "category_type": "expense", "keywords": ["amazon", "flipkart", "shopping", "myntra", "mall", "cred club", "payment on cred"]},
     {"name": "Rent", "icon": "home", "color": "#06b6d4", "category_type": "expense", "keywords": ["rent", "housing", "apartment"]},
-    {"name": "Utilities", "icon": "zap", "color": "#eab308", "category_type": "expense", "keywords": ["electricity", "water", "gas", "utility", "bill"]},
+    {"name": "Utilities", "icon": "zap", "color": "#eab308", "category_type": "expense", "keywords": ["electricity", "water", "gas", "utility", "bill", "airtel", "recharge"]},
     {"name": "Medical", "icon": "heart-pulse", "color": "#ec4899", "category_type": "expense", "keywords": ["hospital", "doctor", "pharmacy", "medical", "health", "medicine"]},
-    {"name": "Entertainment", "icon": "film", "color": "#8b5cf6", "category_type": "expense", "keywords": ["movie", "netflix", "spotify", "entertainment", "gaming"]},
+    {"name": "Entertainment", "icon": "film", "color": "#8b5cf6", "category_type": "expense", "keywords": ["movie", "netflix", "spotify", "entertainment", "gaming", "autopay"]},
     {"name": "Insurance", "icon": "shield", "color": "#14b8a6", "category_type": "expense", "keywords": ["insurance", "premium", "policy", "lic"]},
     {"name": "Education", "icon": "graduation-cap", "color": "#0ea5e9", "category_type": "expense", "keywords": ["school", "college", "course", "education", "tuition", "book"]},
     {"name": "EMI", "icon": "calculator", "color": "#f43f5e", "category_type": "expense", "keywords": ["emi", "installment", "loan payment"]},
@@ -89,9 +89,9 @@ SYSTEM_CATEGORIES = [
     {"name": "Investment", "icon": "trending-up", "color": "#10b981", "category_type": "expense", "keywords": ["mutual fund", "stock", "sip", "invest"]},
     {"name": "Others", "icon": "more-horizontal", "color": "#94a3b8", "category_type": "expense", "keywords": []},
     # Income
-    {"name": "Salary", "icon": "banknote", "color": "#22c55e", "category_type": "income", "keywords": ["salary", "payroll", "wages"]},
+    {"name": "Salary", "icon": "banknote", "color": "#22c55e", "category_type": "income", "keywords": ["salary", "payroll", "wages", "neft", "rtgs", "imps", "credit trxn", "performance media", "performace media", "pmpl"]},
     {"name": "Freelance", "icon": "laptop", "color": "#3b82f6", "category_type": "income", "keywords": ["freelance", "contract", "consulting"]},
-    {"name": "Interest", "icon": "percent", "color": "#06b6d4", "category_type": "income", "keywords": ["interest", "fd", "savings interest"]},
+    {"name": "Interest", "icon": "percent", "color": "#06b6d4", "category_type": "income", "keywords": ["interest", "fd", "savings interest", "int.pd", "int pd"]},
     {"name": "Dividend", "icon": "bar-chart-3", "color": "#8b5cf6", "category_type": "income", "keywords": ["dividend"]},
     {"name": "Rental Income", "icon": "building", "color": "#f97316", "category_type": "income", "keywords": ["rental", "rent received"]},
     {"name": "Refund", "icon": "rotate-ccw", "color": "#14b8a6", "category_type": "income", "keywords": ["refund", "cashback", "return"]},

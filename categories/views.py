@@ -8,7 +8,11 @@ from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet
 
 from categories.models import Category
-from categories.serializers import CategoryCreateSerializer, CategorySerializer
+from categories.serializers import (
+    CategoryCreateSerializer,
+    CategoryListSerializer,
+    CategorySerializer,
+)
 from categories.services import CategoryService
 
 
@@ -24,12 +28,14 @@ class CategoryViewSet(ModelViewSet):
     def get_serializer_class(self):
         if self.action in ("create", "update", "partial_update"):
             return CategoryCreateSerializer
+        if self.action == "list":
+            return CategoryListSerializer
         return CategorySerializer
 
     def get_queryset(self):
         qs = Category.objects.filter(
             models.Q(is_system=True) | models.Q(user=self.request.user)
-        ).select_related("parent").prefetch_related("subcategories")
+        ).select_related("parent")
 
         category_type = self.request.query_params.get("type")
         if category_type:

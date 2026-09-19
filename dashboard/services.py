@@ -141,25 +141,31 @@ class DashboardService:
 
     @staticmethod
     def _get_merchant_breakdown(user) -> list:
-        raw = TransactionService.get_merchant_breakdown(user, limit=10)
-        return [
-            {
-                "name": item["merchant_name"],
-                "total": float(item["total"]),
-                "count": item["count"],
-            }
-            for item in raw
-        ]
+        raw = TransactionService.get_merchant_breakdown(user, limit=8)
+        result = []
+        for item in raw:
+            name = (item["merchant_name"] or "Unknown").strip()
+            # Keep chart labels readable in the narrow vertical bar layout.
+            label = name if len(name) <= 22 else name[:20].rstrip() + "…"
+            result.append(
+                {
+                    "name": label,
+                    "full_name": name,
+                    "total": float(item["total"]),
+                    "count": item["count"],
+                }
+            )
+        return result
 
     @staticmethod
     def _get_recent_transactions(user) -> list:
-        from transactions.serializers import TransactionSerializer
+        from transactions.serializers import TransactionListSerializer
 
         txns = Transaction.objects.filter(user=user).select_related(
-            "category", "account", "currency"
+            "category", "account"
         ).order_by("-date", "-created_at")[:10]
 
-        return TransactionSerializer(txns, many=True).data
+        return TransactionListSerializer(txns, many=True).data
 
     @staticmethod
     def _get_payment_methods(user) -> list:

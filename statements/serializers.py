@@ -25,6 +25,7 @@ class StatementSerializer(serializers.ModelSerializer):
             "status",
             "error_message",
             "transactions_imported",
+            "transactions_skipped",
             "month",
             "year",
             "created_at",
@@ -34,6 +35,7 @@ class StatementSerializer(serializers.ModelSerializer):
             "status",
             "error_message",
             "transactions_imported",
+            "transactions_skipped",
             "created_at",
             "filename",
         ]
@@ -73,6 +75,7 @@ class StatementCreateSerializer(serializers.ModelSerializer):
             "status",
             "filename",
             "transactions_imported",
+            "transactions_skipped",
             "error_message",
         ]
         read_only_fields = [
@@ -80,6 +83,7 @@ class StatementCreateSerializer(serializers.ModelSerializer):
             "status",
             "filename",
             "transactions_imported",
+            "transactions_skipped",
             "error_message",
         ]
 

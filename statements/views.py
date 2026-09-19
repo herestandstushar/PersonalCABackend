@@ -1,6 +1,7 @@
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet
+import threading
 
 from core.permissions import IsOwner
 from statements.models import Statement
@@ -23,7 +24,7 @@ class StatementViewSet(ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
-        # Reload after sync parse so the client gets final status immediately.
+        # Return immediately while import continues in a background thread.
         statement = Statement.objects.select_related("account").get(
             pk=serializer.instance.pk
         )
@@ -39,9 +40,11 @@ class StatementViewSet(ModelViewSet):
         file = self.request.data.get("file")
         statement = serializer.save(user=self.request.user, filename=file.name)
 
-        # Parse in-process (not a daemon thread). Gunicorn/Render workers can
-        # recycle between requests and silently kill background import threads,
-        # which left ICICI PDFs failing on the old empty-table path.
-        StatementParserService.parse_and_import(
-            statement.id, password, save_password
+        # Background import — sync parse of ~80 ICICI rows was taking minutes
+        # (Neon round-trip per txn) and the browser axios 30s timeout canceled it.
+        thread = threading.Thread(
+            target=StatementParserService.parse_and_import,
+            args=(statement.id, password, save_password),
+            daemon=True,
         )
+        thread.start()

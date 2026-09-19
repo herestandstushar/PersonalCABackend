@@ -207,6 +207,8 @@ CORS_ALLOWED_ORIGINS = env.list(
     "CORS_ALLOWED_ORIGINS", default=["http://localhost:3000"]
 )
 CORS_ALLOW_CREDENTIALS = True
+# Cache preflight so the browser skips repeated OPTIONS round-trips.
+CORS_PREFLIGHT_MAX_AGE = 60 * 60 * 24
 # Needed when the SPA on Vercel posts to the API (admin / session cookies).
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=CORS_ALLOWED_ORIGINS)
 

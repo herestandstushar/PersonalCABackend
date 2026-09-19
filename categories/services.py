@@ -32,24 +32,33 @@ class CategoryService:
         return Category.objects.create(user=user, is_system=False, **data)
 
     @staticmethod
-    def auto_categorize(merchant_name: str, description: str = "") -> Category | None:
+    def auto_categorize(
+        merchant_name: str,
+        description: str = "",
+        transaction_type: str | None = None,
+    ) -> Category | None:
         """
         Auto-categorize a transaction based on merchant name and description.
 
-        Uses keyword matching against system categories.
-
-        Returns:
-            Matching Category or None if no match found.
+        Uses keyword matching against system categories. When transaction_type
+        is provided, prefer categories of that type (income vs expense).
         """
         if not merchant_name and not description:
             return None
 
         search_text = f"{merchant_name} {description}".lower()
 
-        # Try to match against system category keywords
         system_categories = Category.objects.filter(is_system=True).exclude(
             keywords=[]
         )
+        if transaction_type == "income":
+            system_categories = system_categories.filter(
+                category_type=CategoryType.INCOME
+            )
+        elif transaction_type == "expense":
+            system_categories = system_categories.filter(
+                category_type=CategoryType.EXPENSE
+            )
 
         best_match = None
         best_score = 0
@@ -58,14 +67,73 @@ class CategoryService:
             score = 0
             for keyword in category.keywords:
                 if keyword.lower() in search_text:
-                    # Longer keyword matches get higher score
                     score += len(keyword)
 
             if score > best_score:
                 best_score = score
                 best_match = category
 
+        # Income / expense without a keyword match still get a sensible default.
+        if best_match is None and transaction_type == "income":
+            return Category.objects.filter(
+                is_system=True, name="Other Income"
+            ).first()
+        if best_match is None and transaction_type == "expense":
+            return Category.objects.filter(
+                is_system=True, name="Others"
+            ).first()
+
         return best_match
+
+    @staticmethod
+    def refresh_system_keywords():
+        """Push SYSTEM_CATEGORIES keyword updates onto existing DB rows."""
+        updated = 0
+        for cat_data in SYSTEM_CATEGORIES:
+            n = Category.objects.filter(
+                name=cat_data["name"], is_system=True
+            ).update(keywords=cat_data["keywords"])
+            updated += n
+        return updated
+
+    @staticmethod
+    def categorize_uncategorized(user=None, limit: int | None = None) -> int:
+        """Assign categories to transactions that have none."""
+        from transactions.models import Transaction, TransactionType
+
+        qs = Transaction.objects.filter(category__isnull=True).select_related(
+            "user"
+        )
+        if user is not None:
+            qs = qs.filter(user=user)
+        if limit:
+            qs = qs[:limit]
+
+        count = 0
+        for txn in qs.iterator(chunk_size=200):
+            hint = (
+                "income"
+                if txn.transaction_type
+                in (TransactionType.INCOME, TransactionType.RECURRING_INCOME)
+                else "expense"
+                if txn.transaction_type
+                in (
+                    TransactionType.EXPENSE,
+                    TransactionType.RECURRING_EXPENSE,
+                    TransactionType.EMI,
+                )
+                else None
+            )
+            cat = CategoryService.auto_categorize(
+                txn.merchant_name or "",
+                txn.description or "",
+                transaction_type=hint,
+            )
+            if cat:
+                txn.category = cat
+                txn.save(update_fields=["category", "updated_at"])
+                count += 1
+        return count
 
     @staticmethod
     def seed_system_categories():

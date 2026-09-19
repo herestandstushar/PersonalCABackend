@@ -68,17 +68,21 @@ class IciciStatementParser:
     @classmethod
     def matches(cls, text: str) -> bool:
         upper = text.upper()
-        if "ICICI" not in upper:
+        # HDFC (and other) statements often mention ICICI in UPI VPAs — require
+        # the bank identity, not a stray "ICICI" in a narration.
+        if "HDFC BANK" in upper or "RTGS/NEFT IFSC : HDFC" in upper:
+            return False
+        if "ICICI BANK" not in upper:
             return False
         return any(
             needle in upper
             for needle in (
                 "STATEMENT OF TRANSACTIONS",
                 "TRANSACTION REMARKS",
-                "WITHDRAWAL AMOUNT",
-                "ACCOUNT NO",
                 "OPTRANSACTIONHISTORY",
                 "JASPERREPORTS",
+                "ACCOUNT NO.",
+                "ACCOUNT NO ",
             )
         )
 
@@ -515,7 +519,7 @@ class HdfcStatementParser:
         return txns
 
 
-PARSERS = [IciciStatementParser, HdfcStatementParser]
+PARSERS = [HdfcStatementParser, IciciStatementParser]
 
 SUPPORTED_BANKS = "ICICI Bank, HDFC Bank"
 

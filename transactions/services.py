@@ -46,7 +46,19 @@ class TransactionService:
         if not data.get("category"):
             merchant = data.get("merchant_name", "")
             description = data.get("description", "")
-            auto_cat = CategoryService.auto_categorize(merchant, description)
+            txn_type = data.get("transaction_type")
+            hint = None
+            if txn_type in (TransactionType.INCOME, TransactionType.RECURRING_INCOME):
+                hint = "income"
+            elif txn_type in (
+                TransactionType.EXPENSE,
+                TransactionType.RECURRING_EXPENSE,
+                TransactionType.EMI,
+            ):
+                hint = "expense"
+            auto_cat = CategoryService.auto_categorize(
+                merchant, description, transaction_type=hint
+            )
             if auto_cat:
                 data["category"] = auto_cat
 

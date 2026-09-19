@@ -7,6 +7,7 @@ Generic table extraction remains as a fallback when an account is already chosen
 """
 
 import re
+from collections import Counter
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
@@ -53,8 +54,10 @@ class StatementParserService:
         try:
             name = (statement.filename or statement.file.name).lower()
             if name.endswith(".pdf"):
-                imported, used_password = StatementParserService._import_smart_pdf(
-                    statement, password=password, save_password=save_password
+                imported, skipped, used_password = (
+                    StatementParserService._import_smart_pdf(
+                        statement, password=password, save_password=save_password
+                    )
                 )
             else:
                 df = StatementParserService._read_file(statement, password=password)
@@ -64,15 +67,18 @@ class StatementParserService:
                         "Select an account for CSV/Excel imports."
                     )
                 mapping = StatementParserService._resolve_mapping(df.columns.tolist())
-                imported = StatementParserService._import_rows(statement, df, mapping)
+                imported, skipped = StatementParserService._import_rows(
+                    statement, df, mapping
+                )
 
-            if imported == 0:
+            if imported == 0 and skipped == 0:
                 raise StatementParseError(
                     "No transactions could be read from this file."
                 )
 
             statement.status = StatementStatus.COMPLETED
             statement.transactions_imported = imported
+            statement.transactions_skipped = skipped
             statement.error_message = ""
         except Exception as exc:
             statement.status = StatementStatus.FAILED
@@ -88,6 +94,7 @@ class StatementParserService:
             update_fields=[
                 "status",
                 "transactions_imported",
+                "transactions_skipped",
                 "error_message",
                 "account",
             ]
@@ -122,11 +129,11 @@ class StatementParserService:
                     mapping = StatementParserService._resolve_mapping(
                         df.columns.tolist()
                     )
-                    imported = StatementParserService._import_rows(
+                    imported, skipped = StatementParserService._import_rows(
                         statement, df, mapping
                     )
-                    if imported > 0:
-                        return imported, used_password
+                    if imported > 0 or skipped > 0:
+                        return imported, skipped, used_password
                 except StatementParseError:
                     pass
             raise StatementParseError(bank_error) from exc
@@ -149,8 +156,10 @@ class StatementParserService:
 
             AccountService.set_statement_password(statement.account, used_password)
 
-        imported = StatementParserService._import_parsed_txns(statement, parsed)
-        return imported, used_password
+        imported, skipped = StatementParserService._import_parsed_txns(
+            statement, parsed
+        )
+        return imported, skipped, used_password
 
     @staticmethod
     def _tables_have_data(tables) -> bool:
@@ -312,35 +321,123 @@ class StatementParserService:
         )
 
     @staticmethod
-    def _import_parsed_txns(statement, parsed) -> int:
-        imported = 0
+    def _normalize_desc(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "").strip().upper())
+
+    @staticmethod
+    def _dedupe_key(date, amount, txn_type, description: str):
+        return (date, Decimal(amount), str(txn_type), StatementParserService._normalize_desc(description))
+
+    @staticmethod
+    def _existing_dedupe_counts(account, user, date_min, date_max) -> Counter:
+        """Multiset of existing txns on this account in [date_min, date_max]."""
+        from transactions.models import Transaction
+
+        counts: Counter = Counter()
+        for date, amount, txn_type, description in Transaction.objects.filter(
+            account=account,
+            user=user,
+            date__gte=date_min,
+            date__lte=date_max,
+        ).values_list("date", "amount", "transaction_type", "description"):
+            counts[
+                StatementParserService._dedupe_key(
+                    date, amount, txn_type, description
+                )
+            ] += 1
+        return counts
+
+    @staticmethod
+    def _import_parsed_txns(statement, parsed) -> tuple[int, int]:
+        """
+        Bulk-insert statement rows, skipping ones already on this account
+        (same date + amount + type + description). Returns (imported, skipped).
+        """
+        from django.utils import timezone
+        from categories.services import CategoryService
+        from transactions.models import PaymentMethod, Transaction
+
+        if not parsed.transactions:
+            return 0, 0
+
+        account = statement.account
+        currency = account.currency
+        now = timezone.now()
+        rows: list[Transaction] = []
+        skipped = 0
+
+        date_min = min(t.date for t in parsed.transactions)
+        date_max = max(t.date for t in parsed.transactions)
+        existing = StatementParserService._existing_dedupe_counts(
+            account, statement.user, date_min, date_max
+        )
+
+        for txn in parsed.transactions:
+            txn_type = (
+                TransactionType.INCOME
+                if txn.txn_type == "income"
+                else TransactionType.EXPENSE
+            )
+            desc = txn.description or ""
+            key = StatementParserService._dedupe_key(
+                txn.date, txn.amount, txn_type, desc
+            )
+            if existing[key] > 0:
+                existing[key] -= 1
+                skipped += 1
+                continue
+
+            merchant = (txn.merchant_name or desc[:100])[:300]
+            is_upi = "UPI" in desc.upper()[:8]
+            category = CategoryService.auto_categorize(
+                merchant, desc, transaction_type=txn.txn_type
+            )
+            rows.append(
+                Transaction(
+                    user=statement.user,
+                    account=account,
+                    currency=currency,
+                    category=category,
+                    transaction_type=txn_type,
+                    amount=txn.amount,
+                    date=txn.date,
+                    description=desc[:2000],
+                    merchant_name=merchant,
+                    source=TransactionSource.STATEMENT_IMPORT,
+                    statement_reference=(
+                        f"stmt_{statement.id}_{parsed.parser_id}_{txn.serial}"
+                    )[:500],
+                    payment_method=(
+                        PaymentMethod.UPI if is_upi else PaymentMethod.NET_BANKING
+                    ),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            # Prevent double-insert if the same row appears twice in one PDF
+            # and isn't already in the DB (rare); second copy still imports.
+            # existing stays unchanged so identical new pairs both import.
+
         with db_transaction.atomic():
-            for txn in parsed.transactions:
-                txn_type = (
-                    TransactionType.INCOME
-                    if txn.txn_type == "income"
-                    else TransactionType.EXPENSE
+            if rows:
+                Transaction.objects.bulk_create(rows, batch_size=200)
+
+            # Only refresh balance from this statement if it ends on/after the
+            # latest txn date on the account (avoids rolling balance back when
+            # re-uploading an older overlapping PDF).
+            last = parsed.transactions[-1]
+            if getattr(last, "balance", None) is not None:
+                latest = (
+                    Transaction.objects.filter(account=account)
+                    .order_by("-date")
+                    .values_list("date", flat=True)
+                    .first()
                 )
-                TransactionService.create_transaction(
-                    statement.user,
-                    {
-                        "account": statement.account,
-                        "transaction_type": txn_type,
-                        "amount": txn.amount,
-                        "date": txn.date,
-                        "description": txn.description,
-                        "merchant_name": txn.merchant_name or txn.description[:100],
-                        "source": TransactionSource.STATEMENT_IMPORT,
-                        "statement_reference": (
-                            f"stmt_{statement.id}_{parsed.parser_id}_{txn.serial}"
-                        ),
-                        "payment_method": "upi"
-                        if "UPI" in txn.description.upper()[:8]
-                        else "net_banking",
-                    },
-                )
-                imported += 1
-        return imported
+                if latest is None or last.date >= latest:
+                    account.current_balance = last.balance
+                    account.save(update_fields=["current_balance", "updated_at"])
+
+        return len(rows), skipped
 
     @staticmethod
     def _extract_pdf_text(path, password: str = "") -> str:
@@ -516,12 +613,33 @@ class StatementParserService:
     @staticmethod
     def _import_rows(statement, df, mapping):
         imported = 0
+        skipped = 0
+        parsed_rows = []
+        for index, row in df.iterrows():
+            parsed = StatementParserService._parse_row(row, mapping)
+            if not parsed:
+                continue
+            parsed_rows.append((index, parsed))
+
+        if not parsed_rows:
+            return 0, 0
+
+        date_min = min(p[1][0] for p in parsed_rows)
+        date_max = max(p[1][0] for p in parsed_rows)
+        existing = StatementParserService._existing_dedupe_counts(
+            statement.account, statement.user, date_min, date_max
+        )
+
         with db_transaction.atomic():
-            for index, row in df.iterrows():
-                parsed = StatementParserService._parse_row(row, mapping)
-                if not parsed:
+            for index, (txn_date, description, amount, txn_type) in parsed_rows:
+                key = StatementParserService._dedupe_key(
+                    txn_date, amount, txn_type, description
+                )
+                if existing[key] > 0:
+                    existing[key] -= 1
+                    skipped += 1
                     continue
-                txn_date, description, amount, txn_type = parsed
+
                 TransactionService.create_transaction(
                     statement.user,
                     {
@@ -536,7 +654,7 @@ class StatementParserService:
                     },
                 )
                 imported += 1
-        return imported
+        return imported, skipped
 
     @staticmethod
     def _parse_row(row, mapping):

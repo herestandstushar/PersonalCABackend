@@ -26,6 +26,8 @@ class AccountViewSet(ModelViewSet):
     GET    /accounts/{id}/     — Get account details
     PATCH  /accounts/{id}/     — Update account
     DELETE /accounts/{id}/     — Soft-delete account
+    POST   /accounts/{id}/reset/ — Clear history for one account
+    POST   /accounts/reset-all/  — Clear history for all accounts
     GET    /accounts/summary/  — Get balance summary
     """
 
@@ -70,6 +72,18 @@ class AccountViewSet(ModelViewSet):
             user=self.request.user,
             account_id=instance.id,
         )
+
+    @action(detail=True, methods=["post"])
+    def reset(self, request, pk=None):
+        """POST /accounts/{id}/reset/ — Clear transactions & statements; zero balance."""
+        result = AccountService.reset_account(request.user, pk)
+        return Response(result)
+
+    @action(detail=False, methods=["post"], url_path="reset-all")
+    def reset_all(self, request):
+        """POST /accounts/reset-all/ — Clear history for every account."""
+        result = AccountService.reset_all_accounts(request.user)
+        return Response(result)
 
     @action(detail=False, methods=["get"])
     def summary(self, request):

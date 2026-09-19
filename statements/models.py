@@ -37,6 +37,10 @@ class Statement(BaseModel):
     )
     error_message = models.TextField(blank=True)
     transactions_imported = models.IntegerField(default=0)
+    transactions_skipped = models.IntegerField(
+        default=0,
+        help_text="Rows skipped as duplicates of existing account transactions.",
+    )
     month = models.IntegerField(null=True, blank=True)
     year = models.IntegerField(null=True, blank=True)
 

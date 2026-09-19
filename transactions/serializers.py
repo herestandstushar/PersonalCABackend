@@ -4,17 +4,63 @@ Transactions serializers.
 
 from rest_framework import serializers
 
-from accounts.serializers import AccountSerializer
-from categories.serializers import CategorySerializer
+from accounts.models import Account
+from categories.models import Category
 from transactions.models import Transaction, TransactionType
 from users.models import Currency
 
 
-class TransactionSerializer(serializers.ModelSerializer):
-    """Read serializer with nested category and account details."""
+class CategoryBriefSerializer(serializers.ModelSerializer):
+    """Minimal category payload for nested list/detail embeds."""
 
-    category_detail = CategorySerializer(source="category", read_only=True)
-    account_detail = AccountSerializer(source="account", read_only=True)
+    class Meta:
+        model = Category
+        fields = ["id", "name", "icon", "color", "category_type"]
+
+
+class AccountBriefSerializer(serializers.ModelSerializer):
+    """Minimal account payload — avoids decrypting numbers on every list row."""
+
+    class Meta:
+        model = Account
+        fields = ["id", "name", "account_type", "color", "icon"]
+
+
+class TransactionListSerializer(serializers.ModelSerializer):
+    """Lean list serializer for fast table loads."""
+
+    category_detail = CategoryBriefSerializer(source="category", read_only=True)
+    account_detail = AccountBriefSerializer(source="account", read_only=True)
+    is_credit = serializers.BooleanField(read_only=True)
+    is_debit = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Transaction
+        fields = [
+            "id",
+            "transaction_type",
+            "amount",
+            "currency",
+            "date",
+            "merchant_name",
+            "description",
+            "category",
+            "category_detail",
+            "account",
+            "account_detail",
+            "payment_method",
+            "source",
+            "is_credit",
+            "is_debit",
+            "created_at",
+        ]
+
+
+class TransactionSerializer(serializers.ModelSerializer):
+    """Full read serializer for single-transaction views / edits."""
+
+    category_detail = CategoryBriefSerializer(source="category", read_only=True)
+    account_detail = AccountBriefSerializer(source="account", read_only=True)
     is_credit = serializers.BooleanField(read_only=True)
     is_debit = serializers.BooleanField(read_only=True)
 

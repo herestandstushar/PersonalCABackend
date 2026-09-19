@@ -14,6 +14,7 @@ from transactions.serializers import (
     SpendingSummarySerializer,
     TransactionBulkSerializer,
     TransactionCreateSerializer,
+    TransactionListSerializer,
     TransactionSerializer,
 )
 from transactions.services import TransactionService
@@ -47,12 +48,16 @@ class TransactionViewSet(ModelViewSet):
     def get_serializer_class(self):
         if self.action in ("create", "update", "partial_update"):
             return TransactionCreateSerializer
+        if self.action == "list":
+            return TransactionListSerializer
         return TransactionSerializer
 
     def get_queryset(self):
-        return Transaction.objects.filter(
-            user=self.request.user
-        ).select_related("category", "account", "currency", "to_account")
+        qs = Transaction.objects.filter(user=self.request.user)
+        if self.action == "list":
+            # Skip currency/to_account joins — list serializer does not need them.
+            return qs.select_related("category", "account")
+        return qs.select_related("category", "account", "currency", "to_account")
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
