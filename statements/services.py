@@ -80,6 +80,12 @@ class StatementParserService:
             statement.transactions_imported = imported
             statement.transactions_skipped = skipped
             statement.error_message = ""
+            try:
+                from dashboard.services import DashboardService
+
+                DashboardService.invalidate_cache(statement.user)
+            except Exception:
+                pass
         except Exception as exc:
             statement.status = StatementStatus.FAILED
             message = str(exc)

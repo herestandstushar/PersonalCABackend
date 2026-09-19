@@ -50,37 +50,86 @@ def _to_decimal(raw: str) -> Optional[Decimal]:
 
 
 # ---------------------------------------------------------------------------
+# Shared bank identity helpers
+# ---------------------------------------------------------------------------
+
+def _looks_like_icici(text: str) -> bool:
+    """True when the PDF itself is an ICICI statement (not just UPI mentions)."""
+    upper = text.upper()
+    return any(
+        needle in upper
+        for needle in (
+            "ICICIBANK.COM",
+            "TEAM ICICI BANK",
+            "ICIC000",  # ICICI IFSC prefix
+            "SUMMARY OF ACCOUNTS HELD UNDER CUST ID",
+            "STATEMENT OF TRANSACTIONS IN SAVINGS",
+            "STATEMENT OF TRANSACTIONS IN CURRENT",
+            "OPTRANSACTIONHISTORY",
+            "JASPERREPORTS",
+        )
+    )
+
+
+def _looks_like_hdfc(text: str) -> bool:
+    """True for real HDFC statements — ignore counterparty 'HDFC BANK' in UPI lines."""
+    if _looks_like_icici(text):
+        return False
+    upper = text.upper()
+    return (
+        ("STATEMENT FROM" in upper and "HDFC" in upper)
+        or "RTGS/NEFT IFSC : HDFC" in upper
+        or ("ACCOUNT BRANCH" in upper and "HDFC BANK" in upper)
+        or (
+            "CLOSING BALANCE" in upper
+            and ("WITHDRAWAL AMT" in upper or "WITHDRAWAL" in upper)
+            and "HDFC" in upper
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
 # ICICI
 # ---------------------------------------------------------------------------
 
-# SNo  DD.MM.YYYY|DD/MM/YYYY  amount  [optional second amount]  balance
+# Classic OpTransactionHistory / Jasper: SNo  DD.MM.YYYY  amount  [amount]  balance
 TXN_LINE = re.compile(
     r"^(\d+)\s+(\d{2}[./]\d{2}[./]\d{4})\s+([\d,]+\.\d{2})"
     r"(?:\s+([\d,]+\.\d{2}))?\s+([\d,]+\.\d{2})\s*$"
 )
 
+# Multi-page Cust-ID statement: DD-MM-YYYY … amount(s) balance
+_ICICI_DATE_LINE = re.compile(r"^(\d{2}-\d{2}-\d{4})\b(.*)$")
+_ICICI_MONEY = re.compile(r"[\d,]+\.\d{2}")
+_ICICI_SKIP = re.compile(
+    r"^(?:Page \d|DATE MODE|MR\.|TOTAL\b|Account Related|ACCOUNT TYPE|"
+    r"Nominee|Sincerely|Team ICICI|This is a|Legends|REGD ADDRESS|"
+    r"Customers are|MHW1|Did you know|Summary of Accounts|ACCOUNT DETAILS|"
+    r"Statement of Transactions|Visit www|Dial your)",
+    re.I,
+)
+
 
 class IciciStatementParser:
-    """ICICI Bank savings / current account PDF (JasperReports layout)."""
+    """ICICI Bank savings / current account PDF (Jasper + Cust-ID layouts)."""
 
     id = "icici"
 
     @classmethod
     def matches(cls, text: str) -> bool:
+        if _looks_like_icici(text):
+            return True
         upper = text.upper()
-        # HDFC (and other) statements often mention ICICI in UPI VPAs — require
-        # the bank identity, not a stray "ICICI" in a narration.
-        if "HDFC BANK" in upper or "RTGS/NEFT IFSC : HDFC" in upper:
-            return False
+        # Older Jasper exports that don't include the URL / Team footer
         if "ICICI BANK" not in upper:
+            return False
+        if _looks_like_hdfc(text):
             return False
         return any(
             needle in upper
             for needle in (
                 "STATEMENT OF TRANSACTIONS",
                 "TRANSACTION REMARKS",
-                "OPTRANSACTIONHISTORY",
-                "JASPERREPORTS",
                 "ACCOUNT NO.",
                 "ACCOUNT NO ",
             )
@@ -90,6 +139,8 @@ class IciciStatementParser:
     def parse(cls, text: str) -> ParsedStatement:
         meta = cls._extract_meta(text)
         rows = cls._extract_txn_rows(text)
+        if not rows:
+            rows = cls._extract_txn_rows_deposits_withdrawals(text)
         if not rows:
             raise ValueError(
                 "Recognized an ICICI statement but found no transaction lines. "
@@ -104,12 +155,20 @@ class IciciStatementParser:
         meta = StatementMeta(bank_name="ICICI Bank")
 
         m = re.search(
-            r"(?:Saving|Savings|Current)\s+Account\s+no\.\s*(\d+)",
+            r"(?:Saving|Savings|Current)\s+Account\s+(?:no\.|Number:)\s*(\d+)",
             text,
             re.I,
         )
         if not m:
+            m = re.search(
+                r"Statement of Transactions in Savings Account Number:\s*(\d+)",
+                text,
+                re.I,
+            )
+        if not m:
             m = re.search(r"Account\s+no\.\s*(\d+)", text, re.I)
+        if not m:
+            m = re.search(r"Savings\s+(\d{9,18})\s+\d", text)
         if m:
             meta.account_number = m.group(1)
 
@@ -173,8 +232,125 @@ class IciciStatementParser:
         return rows
 
     @classmethod
+    def _extract_txn_rows_deposits_withdrawals(cls, text: str) -> list[dict]:
+        """
+        Cust-ID / multi-month ICICI PDF:
+        DATE MODE** PARTICULARS DEPOSITS WITHDRAWALS BALANCE
+        with DD-MM-YYYY dates and multi-line narrations.
+        """
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        rows: list[dict] = []
+        serial = 0
+        opening_balance: Optional[Decimal] = None
+        consumed_until = -1
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+            if _ICICI_SKIP.match(line):
+                i += 1
+                continue
+
+            m = _ICICI_DATE_LINE.match(line)
+            if not m:
+                i += 1
+                continue
+
+            date_s, rest = m.group(1), m.group(2).strip()
+
+            if re.search(r"\bB/F\b", rest, re.I):
+                moneys = _ICICI_MONEY.findall(rest)
+                if moneys:
+                    opening_balance = _to_decimal(moneys[-1])
+                i += 1
+                continue
+
+            moneys = _ICICI_MONEY.findall(rest)
+            if len(moneys) < 2:
+                i += 1
+                continue
+
+            balance = _to_decimal(moneys[-1])
+            if balance is None:
+                i += 1
+                continue
+
+            desc_on_line = rest
+            for tok in reversed(moneys):
+                desc_on_line = re.sub(
+                    rf"(?:^|\s){re.escape(tok)}\s*$", "", desc_on_line
+                ).rstrip()
+
+            hint = None
+            if len(moneys) >= 3:
+                deposit = _to_decimal(moneys[-3]) or Decimal("0")
+                withdrawal = _to_decimal(moneys[-2]) or Decimal("0")
+                if withdrawal > 0:
+                    amount, hint = withdrawal, "expense"
+                else:
+                    amount, hint = deposit, "income"
+            else:
+                amount = _to_decimal(moneys[-2])
+                if amount is None or amount == 0:
+                    i += 1
+                    continue
+
+            before: list[str] = []
+            j = i - 1
+            while j > consumed_until:
+                prev = lines[j]
+                if _ICICI_DATE_LINE.match(prev) or _ICICI_SKIP.match(prev):
+                    break
+                before.insert(0, prev)
+                j -= 1
+                if len(before) >= 5:
+                    break
+
+            after: list[str] = []
+            k = i + 1
+            while k < len(lines):
+                nxt = lines[k]
+                if _ICICI_DATE_LINE.match(nxt) or _ICICI_SKIP.match(nxt):
+                    break
+                if after and re.match(
+                    r"^(UPI/|NEFT-|RTGS-|MMT/|IMPS|Credit trxn)", nxt, re.I
+                ):
+                    break
+                after.append(nxt)
+                k += 1
+                if len(after) >= 5:
+                    break
+
+            desc = re.sub(
+                r"\s+",
+                " ",
+                " ".join([*before, desc_on_line, *after]).strip(),
+            ) or "ICICI transaction"
+
+            serial += 1
+            rows.append(
+                {
+                    "serial": serial,
+                    "date": cls._parse_date(date_s),
+                    "amount_a": amount,
+                    "amount_b": None,
+                    "balance": balance,
+                    "description": desc,
+                    "type_hint": hint,
+                    "opening_balance": opening_balance,
+                }
+            )
+            consumed_until = k - 1
+            i = k
+
+        if rows and opening_balance is not None:
+            rows[0]["_prev_balance"] = opening_balance
+
+        return rows
+
+    @classmethod
     def _parse_date(cls, date_s: str):
-        for fmt in ("%d.%m.%Y", "%d/%m/%Y"):
+        for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y"):
             try:
                 return datetime.strptime(date_s, fmt).date()
             except ValueError:
@@ -185,6 +361,10 @@ class IciciStatementParser:
     def _infer_directions(cls, rows: list[dict]) -> list[ParsedTxn]:
         txns: list[ParsedTxn] = []
         prev_balance: Optional[Decimal] = None
+        if rows and rows[0].get("_prev_balance") is not None:
+            prev_balance = rows[0]["_prev_balance"]
+        elif rows and rows[0].get("opening_balance") is not None:
+            prev_balance = rows[0]["opening_balance"]
 
         for row in rows:
             amount = row["amount_a"]
@@ -192,11 +372,14 @@ class IciciStatementParser:
             second = row["amount_b"]
             desc = row["description"]
             desc_l = desc.lower()
+            hint = row.get("type_hint")
 
             txn_type = None
             final_amount = amount
 
-            if second is not None and second > 0 and amount > 0:
+            if hint in ("expense", "income"):
+                txn_type = hint
+            elif second is not None and second > 0 and amount > 0:
                 if prev_balance is not None:
                     if abs((prev_balance - amount) - balance) < Decimal("0.05"):
                         txn_type, final_amount = "expense", amount
@@ -214,8 +397,8 @@ class IciciStatementParser:
                 if any(
                     k in desc_l
                     for k in (
-                        "neft",
-                        "rtgs",
+                        "neft-",
+                        "rtgs-",
                         "imps",
                         "int.pd",
                         "interest",
@@ -265,12 +448,7 @@ class HdfcStatementParser:
 
     @classmethod
     def matches(cls, text: str) -> bool:
-        upper = text.upper()
-        return (
-            "HDFC BANK" in upper
-            or "RTGS/NEFT IFSC : HDFC" in upper
-            or ("ACCOUNT NUMBER" in upper and "HDFC" in upper)
-        )
+        return _looks_like_hdfc(text)
 
     @classmethod
     def parse(cls, text: str) -> ParsedStatement:
@@ -519,7 +697,7 @@ class HdfcStatementParser:
         return txns
 
 
-PARSERS = [HdfcStatementParser, IciciStatementParser]
+PARSERS = [IciciStatementParser, HdfcStatementParser]
 
 SUPPORTED_BANKS = "ICICI Bank, HDFC Bank"
 

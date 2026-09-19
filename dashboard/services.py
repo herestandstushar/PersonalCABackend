@@ -31,6 +31,11 @@ class DashboardService:
         Returns all widgets data in a single response to minimize
         frontend API calls and ensure atomic data consistency.
         """
+        # Remove ghost rows from older soft-deleted accounts before serving.
+        purged = AccountService.purge_orphaned_history(user)
+        if purged.get("transactions_cleared"):
+            DashboardService.invalidate_cache(user)
+
         cache_key = f"dashboard:{user.id}"
         cached = cache.get(cache_key)
         if cached:
@@ -161,7 +166,7 @@ class DashboardService:
     def _get_recent_transactions(user) -> list:
         from transactions.serializers import TransactionListSerializer
 
-        txns = Transaction.objects.filter(user=user).select_related(
+        txns = Transaction.for_user(user).select_related(
             "category", "account"
         ).order_by("-date", "-created_at")[:10]
 

@@ -87,6 +87,12 @@ class TransactionService:
             txn.merchant_name,
             user.email,
         )
+        try:
+            from dashboard.services import DashboardService
+
+            DashboardService.invalidate_cache(user)
+        except Exception:
+            pass
         return txn
 
     @staticmethod
@@ -128,12 +134,18 @@ class TransactionService:
         if txn.transaction_type == TransactionType.TRANSFER and txn.to_account:
             AccountService.update_balance(txn.to_account, txn.amount, is_credit=True)
 
+        try:
+            from dashboard.services import DashboardService
+
+            DashboardService.invalidate_cache(user)
+        except Exception:
+            pass
         return txn
 
     @staticmethod
     @db_transaction.atomic
     def delete_transaction(user, txn_id):
-        """Soft-delete a transaction and reverse the balance."""
+        """Permanently delete a transaction and reverse the balance."""
         try:
             txn = Transaction.objects.select_related("account", "to_account").get(
                 id=txn_id, user=user
@@ -149,8 +161,14 @@ class TransactionService:
         if txn.transaction_type == TransactionType.TRANSFER and txn.to_account:
             AccountService.update_balance(txn.to_account, txn.amount, is_credit=False)
 
-        txn.soft_delete()
+        txn.delete()
         logger.info("Transaction deleted: %s for user %s", txn_id, user.email)
+        try:
+            from dashboard.services import DashboardService
+
+            DashboardService.invalidate_cache(user)
+        except Exception:
+            pass
 
     @staticmethod
     @db_transaction.atomic
@@ -172,7 +190,7 @@ class TransactionService:
         Supports: date_from, date_to, amount_min, amount_max, category,
         merchant, account, transaction_type, tags, search.
         """
-        qs = Transaction.objects.filter(user=user).select_related(
+        qs = Transaction.for_user(user).select_related(
             "category", "account", "currency", "to_account"
         )
 
@@ -221,8 +239,7 @@ class TransactionService:
         now = timezone.now()
         today = now.date()
 
-        base_qs = Transaction.objects.filter(
-            user=user,
+        base_qs = Transaction.for_user(user).filter(
             transaction_type__in=[
                 TransactionType.EXPENSE,
                 TransactionType.RECURRING_EXPENSE,
@@ -259,8 +276,7 @@ class TransactionService:
         now = timezone.now()
         today = now.date()
 
-        income_qs = Transaction.objects.filter(
-            user=user,
+        income_qs = Transaction.for_user(user).filter(
             transaction_type__in=[
                 TransactionType.INCOME,
                 TransactionType.RECURRING_INCOME,
@@ -283,8 +299,7 @@ class TransactionService:
             date_to = now.date()
 
         breakdown = (
-            Transaction.objects.filter(
-                user=user,
+            Transaction.for_user(user).filter(
                 date__gte=date_from,
                 date__lte=date_to,
                 transaction_type__in=[
@@ -309,8 +324,7 @@ class TransactionService:
             date_to = now.date()
 
         breakdown = (
-            Transaction.objects.filter(
-                user=user,
+            Transaction.for_user(user).filter(
                 date__gte=date_from,
                 date__lte=date_to,
                 transaction_type__in=[
@@ -336,8 +350,7 @@ class TransactionService:
             date_to = now.date()
 
         breakdown = (
-            Transaction.objects.filter(
-                user=user,
+            Transaction.for_user(user).filter(
                 date__gte=date_from,
                 date__lte=date_to,
                 transaction_type__in=[
@@ -362,7 +375,7 @@ class TransactionService:
         expense_types = [TransactionType.EXPENSE, TransactionType.RECURRING_EXPENSE, TransactionType.EMI, TransactionType.LOAN_PAYMENT]
 
         monthly_data = (
-            Transaction.objects.filter(user=user, date__gte=from_date)
+            Transaction.for_user(user).filter(date__gte=from_date)
             .annotate(month=TruncMonth("date"))
             .values("month")
             .annotate(
@@ -391,8 +404,7 @@ class TransactionService:
         from_date = timezone.now().date() - timedelta(days=days)
 
         daily = (
-            Transaction.objects.filter(
-                user=user,
+            Transaction.for_user(user).filter(
                 date__gte=from_date,
                 transaction_type__in=[
                     TransactionType.EXPENSE,
@@ -417,8 +429,7 @@ class TransactionService:
             date_to = now.date()
 
         return (
-            Transaction.objects.filter(
-                user=user,
+            Transaction.for_user(user).filter(
                 date__gte=date_from,
                 date__lte=date_to,
                 transaction_type__in=[
@@ -443,8 +454,7 @@ class TransactionService:
         if not amount or not date:
             return None
 
-        qs = Transaction.objects.filter(
-            user=user,
+        qs = Transaction.for_user(user).filter(
             amount=amount,
             date=date,
         )

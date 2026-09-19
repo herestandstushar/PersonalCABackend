@@ -6,7 +6,6 @@ import logging
 
 import requests
 from django.conf import settings
-from django.contrib.auth import authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from core.exceptions import ServiceError, ValidationError
@@ -26,18 +25,32 @@ class AuthService:
         """
         Authenticate user with email/password and return JWT tokens.
 
+        Email is matched case-insensitively.
+
         Returns:
             Dict with access, refresh tokens and user data.
 
         Raises:
             ValidationError: If credentials are invalid.
         """
-        user = authenticate(email=email, password=password)
-        if user is None:
+        from users.models import User
+
+        normalized = (email or "").strip().lower()
+        try:
+            user = User.objects.get(email__iexact=normalized)
+        except User.DoesNotExist:
+            raise ValidationError("Invalid email or password.")
+
+        if not user.check_password(password):
             raise ValidationError("Invalid email or password.")
 
         if not user.is_active:
             raise ValidationError("This account has been deactivated.")
+
+        # Keep stored email lowercase going forward.
+        if user.email != normalized:
+            user.email = normalized
+            user.save(update_fields=["email"])
 
         tokens = AuthService._generate_tokens(user)
         logger.info("User logged in: %s", user.email)
@@ -63,7 +76,9 @@ class AuthService:
         """
         from users.models import User
 
-        if User.objects.filter(email=email).exists():
+        email = (email or "").strip().lower()
+
+        if User.objects.filter(email__iexact=email).exists():
             raise ValidationError("An account with this email already exists.")
 
         user = UserService.create_user(
@@ -123,7 +138,7 @@ class AuthService:
 
         google_data = user_response.json()
         google_id = google_data.get("id")
-        email = google_data.get("email")
+        email = (email or "").strip().lower()
         first_name = google_data.get("given_name", "")
         last_name = google_data.get("family_name", "")
 

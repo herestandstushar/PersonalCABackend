@@ -15,6 +15,16 @@ from core.utils import decrypt_field, encrypt_field, mask_account_number
 logger = logging.getLogger("finsight")
 
 
+def _invalidate_money_caches(user):
+    """Drop cached dashboard aggregates after balances/history change."""
+    try:
+        from dashboard.services import DashboardService
+
+        DashboardService.invalidate_cache(user)
+    except Exception:
+        pass
+
+
 class AccountService:
     """Service layer for account management."""
 
@@ -203,67 +213,116 @@ class AccountService:
             return ""
 
     @staticmethod
-    @transaction.atomic
-    def reset_account(user, account_id) -> dict:
-        """
-        Clear transaction/statement history for one account and zero its balance.
-        Account itself is kept so it can be re-imported cleanly.
-        """
+    def _purge_account_rows(user, account) -> dict:
+        """Hard-delete transactions and statements for one account."""
         from django.db.models import Q
-        from django.utils import timezone
         from statements.models import Statement
         from transactions.models import Transaction
 
-        account = AccountService.get_account(user, account_id)
-        now = timezone.now()
-
-        txn_qs = Transaction.objects.filter(user=user).filter(
-            Q(account=account) | Q(to_account=account)
+        txn_qs = Transaction.all_objects.filter(user=user).filter(
+            Q(account_id=account.id) | Q(to_account_id=account.id)
         )
         transactions_cleared = txn_qs.count()
-        txn_qs.update(is_deleted=True, updated_at=now)
+        txn_qs.delete()
 
-        stmt_qs = Statement.objects.filter(user=user, account=account)
+        stmt_qs = Statement.all_objects.filter(user=user, account_id=account.id)
         statements_cleared = stmt_qs.count()
-        stmt_qs.update(is_deleted=True, updated_at=now)
+        stmt_qs.delete()
 
-        account.current_balance = Decimal("0.00")
-        account.save(update_fields=["current_balance", "updated_at"])
-
-        logger.info(
-            "Account reset: %s (%s txns, %s stmts) for user %s",
-            account.name,
-            transactions_cleared,
-            statements_cleared,
-            user.email,
-        )
         return {
-            "accounts_reset": 1,
             "transactions_cleared": transactions_cleared,
             "statements_cleared": statements_cleared,
         }
 
     @staticmethod
     @transaction.atomic
-    def reset_all_accounts(user) -> dict:
-        """Clear history for every account owned by the user."""
-        from django.utils import timezone
+    def purge_orphaned_history(user) -> dict:
+        """
+        Hard-delete transactions/statements still attached to soft-deleted accounts.
+        Fixes leftovers from older soft-delete-only account removals.
+        """
+        from django.db.models import Q
         from statements.models import Statement
         from transactions.models import Transaction
 
-        now = timezone.now()
+        deleted_ids = list(
+            Account.all_objects.filter(user=user, is_deleted=True).values_list(
+                "id", flat=True
+            )
+        )
+
+        txn_q = Q(is_deleted=True)
+        if deleted_ids:
+            txn_q |= Q(account_id__in=deleted_ids) | Q(to_account_id__in=deleted_ids)
+
+        txn_qs = Transaction.all_objects.filter(user=user).filter(txn_q)
+        transactions_cleared = txn_qs.count()
+        txn_qs.delete()
+
+        stmt_q = Q(is_deleted=True)
+        if deleted_ids:
+            stmt_q |= Q(account_id__in=deleted_ids)
+        stmt_qs = Statement.all_objects.filter(user=user).filter(stmt_q)
+        statements_cleared = stmt_qs.count()
+        stmt_qs.delete()
+
+        # Remove soft-deleted account shells so they cannot reappear via joins.
+        if deleted_ids:
+            Account.all_objects.filter(user=user, id__in=deleted_ids).delete()
+
+        return {
+            "transactions_cleared": transactions_cleared,
+            "statements_cleared": statements_cleared,
+        }
+
+    @staticmethod
+    @transaction.atomic
+    def reset_account(user, account_id) -> dict:
+        """
+        Clear transaction/statement history for one account and zero its balance.
+        Account itself is kept so it can be re-imported cleanly.
+        """
+        account = AccountService.get_account(user, account_id)
+        cleared = AccountService._purge_account_rows(user, account)
+
+        account.current_balance = Decimal("0.00")
+        account.save(update_fields=["current_balance", "updated_at"])
+        _invalidate_money_caches(user)
+
+        logger.info(
+            "Account reset: %s (%s txns, %s stmts) for user %s",
+            account.name,
+            cleared["transactions_cleared"],
+            cleared["statements_cleared"],
+            user.email,
+        )
+        return {
+            "accounts_reset": 1,
+            **cleared,
+        }
+
+    @staticmethod
+    @transaction.atomic
+    def reset_all_accounts(user) -> dict:
+        """Clear history for every account owned by the user."""
+        from statements.models import Statement
+        from transactions.models import Transaction
+
+        AccountService.purge_orphaned_history(user)
+
         accounts = Account.objects.filter(user=user)
         accounts_reset = accounts.count()
 
-        txn_qs = Transaction.objects.filter(user=user)
+        txn_qs = Transaction.all_objects.filter(user=user)
         transactions_cleared = txn_qs.count()
-        txn_qs.update(is_deleted=True, updated_at=now)
+        txn_qs.delete()
 
-        stmt_qs = Statement.objects.filter(user=user)
+        stmt_qs = Statement.all_objects.filter(user=user)
         statements_cleared = stmt_qs.count()
-        stmt_qs.update(is_deleted=True, updated_at=now)
+        stmt_qs.delete()
 
-        accounts.update(current_balance=Decimal("0.00"), updated_at=now)
+        accounts.update(current_balance=Decimal("0.00"))
+        _invalidate_money_caches(user)
 
         logger.info(
             "All accounts reset (%s accounts, %s txns) for user %s",
@@ -278,8 +337,22 @@ class AccountService:
         }
 
     @staticmethod
+    @transaction.atomic
     def delete_account(user, account_id):
-        """Soft-delete an account."""
+        """
+        Permanently remove an account and all of its transactions/statements
+        from the database so dashboards and history stay consistent.
+        """
         account = AccountService.get_account(user, account_id)
-        account.soft_delete()
-        logger.info("Account deleted: %s for user %s", account.name, user.email)
+        name = account.name
+        cleared = AccountService._purge_account_rows(user, account)
+        # Hard delete — CASCADE would also remove remaining FK rows.
+        account.delete()
+        AccountService.purge_orphaned_history(user)
+        _invalidate_money_caches(user)
+        logger.info(
+            "Account deleted: %s (%s txns purged) for user %s",
+            name,
+            cleared["transactions_cleared"],
+            user.email,
+        )

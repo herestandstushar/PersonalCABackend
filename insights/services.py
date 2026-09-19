@@ -21,15 +21,13 @@ class InsightsService:
         sixty_days_ago = today - timedelta(days=60)
         
         # 1. Compare last 30 days vs previous 30 days spending
-        current_month_spend = Transaction.objects.filter(
-            user=user, 
+        current_month_spend = Transaction.for_user(user).filter( 
             date__gte=thirty_days_ago, 
             date__lte=today,
             transaction_type=TransactionType.EXPENSE
         ).aggregate(total=Sum('amount'))['total'] or 0
         
-        prev_month_spend = Transaction.objects.filter(
-            user=user, 
+        prev_month_spend = Transaction.for_user(user).filter( 
             date__gte=sixty_days_ago, 
             date__lt=thirty_days_ago,
             transaction_type=TransactionType.EXPENSE
@@ -58,8 +56,7 @@ class InsightsService:
 
         # 2. Large Transactions Anomaly
         # Find transactions > 3x average transaction size in last 30 days
-        recent_txns = Transaction.objects.filter(
-            user=user, date__gte=thirty_days_ago, transaction_type=TransactionType.EXPENSE
+        recent_txns = Transaction.for_user(user).filter( date__gte=thirty_days_ago, transaction_type=TransactionType.EXPENSE
         )
         if recent_txns.exists():
             avg_txn = sum(t.amount for t in recent_txns) / recent_txns.count()

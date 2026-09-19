@@ -53,7 +53,7 @@ class TransactionViewSet(ModelViewSet):
         return TransactionSerializer
 
     def get_queryset(self):
-        qs = Transaction.objects.filter(user=self.request.user)
+        qs = Transaction.for_user(self.request.user)
         if self.action == "list":
             # Skip currency/to_account joins — list serializer does not need them.
             return qs.select_related("category", "account")

@@ -42,8 +42,7 @@ class BudgetService:
                 end_date = start_date + timezone.timedelta(days=7)
 
             # Filter transactions
-            qs = Transaction.objects.filter(
-                user=user,
+            qs = Transaction.for_user(user).filter(
                 date__gte=start_date,
                 date__lt=end_date,
                 transaction_type__in=[TransactionType.EXPENSE, TransactionType.RECURRING_EXPENSE],

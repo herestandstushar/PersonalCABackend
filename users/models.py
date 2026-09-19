@@ -11,6 +11,11 @@ from django.db import models
 class UserManager(BaseUserManager):
     """Custom user manager that uses email as the unique identifier."""
 
+    def normalize_email(self, email):
+        """Lowercase the entire address — login is case-insensitive."""
+        email = super().normalize_email(email or "")
+        return email.strip().lower()
+
     def create_user(self, email, password=None, **extra_fields):
         if not email:
             raise ValueError("Email is required")

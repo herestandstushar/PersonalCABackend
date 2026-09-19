@@ -69,9 +69,13 @@ class UserService:
 
         # Check if email already exists (user registered via email, now linking Google)
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email__iexact=email)
             user.google_id = google_id
-            user.save(update_fields=["google_id"])
+            if user.email != email:
+                user.email = email
+                user.save(update_fields=["google_id", "email"])
+            else:
+                user.save(update_fields=["google_id"])
             return user, False
         except User.DoesNotExist:
             pass

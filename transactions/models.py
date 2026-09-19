@@ -148,6 +148,11 @@ class Transaction(BaseModel):
             models.Index(fields=["user", "-date", "-created_at"]),
         ]
 
+    @classmethod
+    def for_user(cls, user):
+        """Transactions visible in the app (excludes soft-deleted accounts)."""
+        return cls.objects.filter(user=user, account__is_deleted=False)
+
     def __str__(self):
         return f"{self.transaction_type}: {self.amount} — {self.merchant_name or self.description}"
 
