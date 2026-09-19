@@ -106,21 +106,36 @@ class StatementParserService:
                 "Could not read text from this PDF. Try exporting CSV from your bank."
             )
 
+        # Always prefer bank-specific parsers (ICICI text / HDFC tables).
+        # ICICI JasperReports PDFs expose header-only tables with zero data rows,
+        # so the generic table mapper must never be the primary path.
         try:
             parsed = detect_and_parse(text, tables=tables)
         except ValueError as exc:
-            # Fall back to table extraction when an account was already chosen.
-            if statement.account_id:
-                df = StatementParserService._read_pdf(
-                    statement.file.path, password=used_password
-                )
-                df.columns = [str(c).strip() for c in df.columns]
-                mapping = StatementParserService._resolve_mapping(df.columns.tolist())
-                return (
-                    StatementParserService._import_rows(statement, df, mapping),
-                    used_password,
-                )
-            raise StatementParseError(str(exc)) from exc
+            bank_error = str(exc)
+            # Generic table fallback only when the PDF is unrecognized AND the
+            # user already picked an account AND tables actually contain rows.
+            if statement.account_id and StatementParserService._tables_have_data(tables):
+                try:
+                    df = StatementParserService._tables_to_dataframe(tables)
+                    df.columns = [str(c).strip() for c in df.columns]
+                    mapping = StatementParserService._resolve_mapping(
+                        df.columns.tolist()
+                    )
+                    imported = StatementParserService._import_rows(
+                        statement, df, mapping
+                    )
+                    if imported > 0:
+                        return imported, used_password
+                except StatementParseError:
+                    pass
+            raise StatementParseError(bank_error) from exc
+
+        if not parsed.transactions:
+            raise StatementParseError(
+                f"Recognized {parsed.meta.bank_name or 'this bank'} PDF but found "
+                "no transactions to import."
+            )
 
         # Prefer the account the user picked; otherwise detect/create from the PDF.
         if not statement.account_id:
@@ -136,6 +151,33 @@ class StatementParserService:
 
         imported = StatementParserService._import_parsed_txns(statement, parsed)
         return imported, used_password
+
+    @staticmethod
+    def _tables_have_data(tables) -> bool:
+        for table in tables or []:
+            if table and len(table) > 1:
+                return True
+        return False
+
+    @staticmethod
+    def _tables_to_dataframe(tables):
+        rows, header = [], None
+        for table in tables or []:
+            if not table:
+                continue
+            if header is None:
+                header = [str(c or "").strip() for c in table[0]]
+                body = table[1:]
+            else:
+                body = table
+            for row in body:
+                if row and len(row) == len(header):
+                    rows.append([str(c or "").strip() for c in row])
+        if not header or not rows:
+            raise StatementParseError(
+                "No transaction rows could be extracted from this PDF."
+            )
+        return pd.DataFrame(rows, columns=header)
 
     @staticmethod
     def _password_candidates(statement, password: str = "") -> list[str]:

@@ -53,9 +53,9 @@ def _to_decimal(raw: str) -> Optional[Decimal]:
 # ICICI
 # ---------------------------------------------------------------------------
 
-# SNo  DD.MM.YYYY  amount  [optional second amount]  balance
+# SNo  DD.MM.YYYY|DD/MM/YYYY  amount  [optional second amount]  balance
 TXN_LINE = re.compile(
-    r"^(\d+)\s+(\d{2}\.\d{2}\.\d{4})\s+([\d,]+\.\d{2})"
+    r"^(\d+)\s+(\d{2}[./]\d{2}[./]\d{4})\s+([\d,]+\.\d{2})"
     r"(?:\s+([\d,]+\.\d{2}))?\s+([\d,]+\.\d{2})\s*$"
 )
 
@@ -68,10 +68,18 @@ class IciciStatementParser:
     @classmethod
     def matches(cls, text: str) -> bool:
         upper = text.upper()
-        return "ICICI BANK" in upper and (
-            "STATEMENT OF TRANSACTIONS" in upper
-            or "TRANSACTION REMARKS" in upper
-            or "WITHDRAWAL" in upper
+        if "ICICI" not in upper:
+            return False
+        return any(
+            needle in upper
+            for needle in (
+                "STATEMENT OF TRANSACTIONS",
+                "TRANSACTION REMARKS",
+                "WITHDRAWAL AMOUNT",
+                "ACCOUNT NO",
+                "OPTRANSACTIONHISTORY",
+                "JASPERREPORTS",
+            )
         )
 
     @classmethod
@@ -79,7 +87,10 @@ class IciciStatementParser:
         meta = cls._extract_meta(text)
         rows = cls._extract_txn_rows(text)
         if not rows:
-            raise ValueError("No ICICI transactions found in this PDF.")
+            raise ValueError(
+                "Recognized an ICICI statement but found no transaction lines. "
+                "Try re-downloading the PDF from iMobile / Internet Banking."
+            )
 
         txns = cls._infer_directions(rows)
         return ParsedStatement(meta=meta, transactions=txns, parser_id=cls.id)
@@ -146,7 +157,7 @@ class IciciStatementParser:
             rows.append(
                 {
                     "serial": int(sno),
-                    "date": datetime.strptime(date_s, "%d.%m.%Y").date(),
+                    "date": cls._parse_date(date_s),
                     "amount_a": amount,
                     "amount_b": second,
                     "balance": balance,
@@ -156,6 +167,15 @@ class IciciStatementParser:
 
         rows.sort(key=lambda r: (r["serial"], r["date"]))
         return rows
+
+    @classmethod
+    def _parse_date(cls, date_s: str):
+        for fmt in ("%d.%m.%Y", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(date_s, fmt).date()
+            except ValueError:
+                continue
+        raise ValueError(f"Unrecognized ICICI date: {date_s}")
 
     @classmethod
     def _infer_directions(cls, rows: list[dict]) -> list[ParsedTxn]:
