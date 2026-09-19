@@ -21,15 +21,16 @@ class StatementViewSet(ModelViewSet):
         return Statement.objects.filter(user=self.request.user).select_related("account")
 
     def perform_create(self, serializer):
-        # Password unlocks encrypted PDFs and is never persisted.
+        # Password unlocks encrypted PDFs and is never persisted on Statement.
         password = serializer.validated_data.pop("password", "") or ""
+        save_password = serializer.validated_data.pop("save_password", True)
         file = self.request.data.get("file")
         statement = serializer.save(user=self.request.user, filename=file.name)
 
         # MVP: parse in a background thread (Celery in production).
         thread = threading.Thread(
             target=StatementParserService.parse_and_import,
-            args=(statement.id, password),
+            args=(statement.id, password, save_password),
         )
         thread.daemon = True
         thread.start()

@@ -40,12 +40,18 @@ class StatementSerializer(serializers.ModelSerializer):
 
 
 class StatementCreateSerializer(serializers.ModelSerializer):
-    # Write-only: used to unlock password-protected PDFs, never stored.
+    # Write-only: used to unlock password-protected PDFs, never stored on Statement.
     password = serializers.CharField(
         required=False,
         allow_blank=True,
         write_only=True,
         help_text="Password for encrypted PDF statements.",
+    )
+    save_password = serializers.BooleanField(
+        required=False,
+        default=True,
+        write_only=True,
+        help_text="When true, store the PDF password on the resolved account for next time.",
     )
     account = serializers.PrimaryKeyRelatedField(
         queryset=Account.objects.none(),
@@ -63,6 +69,7 @@ class StatementCreateSerializer(serializers.ModelSerializer):
             "month",
             "year",
             "password",
+            "save_password",
             "status",
             "filename",
             "transactions_imported",

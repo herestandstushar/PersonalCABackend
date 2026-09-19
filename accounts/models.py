@@ -38,6 +38,10 @@ class Account(BaseModel):
         blank=True,
         help_text="Encrypted account/card number",
     )
+    statement_password_encrypted = models.TextField(
+        blank=True,
+        help_text="Encrypted PDF statement password for this account (never returned in API).",
+    )
     currency = models.ForeignKey(
         "users.Currency",
         on_delete=models.PROTECT,

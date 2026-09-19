@@ -15,6 +15,7 @@ class AccountSerializer(serializers.ModelSerializer):
 
     currency_detail = CurrencySerializer(source="currency", read_only=True)
     masked_account_number = serializers.SerializerMethodField()
+    has_statement_password = serializers.SerializerMethodField()
     available_credit = serializers.DecimalField(
         max_digits=15, decimal_places=2, read_only=True
     )
@@ -28,6 +29,7 @@ class AccountSerializer(serializers.ModelSerializer):
             "account_type",
             "bank_name",
             "masked_account_number",
+            "has_statement_password",
             "currency",
             "currency_detail",
             "current_balance",
@@ -48,11 +50,26 @@ class AccountSerializer(serializers.ModelSerializer):
     def get_masked_account_number(self, obj):
         return AccountService.get_masked_account_number(obj)
 
+    def get_has_statement_password(self, obj):
+        return bool(obj.statement_password_encrypted)
+
 
 class AccountCreateSerializer(serializers.ModelSerializer):
     """Write serializer — validates account creation data."""
 
     account_number = serializers.CharField(required=False, write_only=True)
+    statement_password = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        write_only=True,
+        help_text="PDF statement password — stored encrypted; never returned.",
+    )
+    clear_statement_password = serializers.BooleanField(
+        required=False,
+        write_only=True,
+        default=False,
+        help_text="Set true to remove the saved statement password.",
+    )
     currency = serializers.PrimaryKeyRelatedField(
         queryset=Currency.objects.all(),
         required=False,
@@ -68,6 +85,8 @@ class AccountCreateSerializer(serializers.ModelSerializer):
             "account_type",
             "bank_name",
             "account_number",
+            "statement_password",
+            "clear_statement_password",
             "currency",
             "current_balance",
             "credit_limit",

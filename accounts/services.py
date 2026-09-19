@@ -32,6 +32,12 @@ class AccountService:
         if account_number:
             encrypted_number = encrypt_field(account_number)
 
+        statement_password = data.pop("statement_password", None)
+        data.pop("clear_statement_password", None)
+        encrypted_stmt_pw = ""
+        if statement_password:
+            encrypted_stmt_pw = encrypt_field(statement_password)
+
         # Fall back to the user's preferred currency so clients need not send one
         if not data.get("currency"):
             currency = user.default_currency
@@ -57,6 +63,7 @@ class AccountService:
         account = Account.objects.create(
             user=user,
             account_number_encrypted=encrypted_number,
+            statement_password_encrypted=encrypted_stmt_pw,
             **data,
         )
 
@@ -161,6 +168,13 @@ class AccountService:
         if account_number:
             account.account_number_encrypted = encrypt_field(account_number)
 
+        clear_stmt_pw = data.pop("clear_statement_password", False)
+        statement_password = data.pop("statement_password", None)
+        if clear_stmt_pw:
+            account.statement_password_encrypted = ""
+        elif statement_password:
+            account.statement_password_encrypted = encrypt_field(statement_password)
+
         if data.get("is_default"):
             Account.objects.filter(user=user, is_default=True).update(is_default=False)
 
@@ -170,6 +184,23 @@ class AccountService:
 
         account.save()
         return account
+
+    @staticmethod
+    def set_statement_password(account: Account, password: str) -> None:
+        """Encrypt and store a PDF statement password on the account."""
+        if not password:
+            return
+        account.statement_password_encrypted = encrypt_field(password)
+        account.save(update_fields=["statement_password_encrypted", "updated_at"])
+
+    @staticmethod
+    def get_statement_password(account: Account) -> str:
+        if not account.statement_password_encrypted:
+            return ""
+        try:
+            return decrypt_field(account.statement_password_encrypted)
+        except Exception:
+            return ""
 
     @staticmethod
     def delete_account(user, account_id):

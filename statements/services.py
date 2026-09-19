@@ -41,18 +41,20 @@ class StatementParseError(Exception):
 
 class StatementParserService:
     @staticmethod
-    def parse_and_import(statement_id, password: str = ""):
+    def parse_and_import(statement_id, password: str = "", save_password: bool = True):
         statement = Statement.objects.select_related("account", "user").get(
             id=statement_id
         )
         statement.status = StatementStatus.PROCESSING
         statement.save(update_fields=["status"])
 
+        used_password = password or ""
+
         try:
             name = (statement.filename or statement.file.name).lower()
             if name.endswith(".pdf"):
-                imported = StatementParserService._import_smart_pdf(
-                    statement, password=password
+                imported, used_password = StatementParserService._import_smart_pdf(
+                    statement, password=password, save_password=save_password
                 )
             else:
                 df = StatementParserService._read_file(statement, password=password)
@@ -95,9 +97,9 @@ class StatementParserService:
     # ---- smart PDF ----
 
     @staticmethod
-    def _import_smart_pdf(statement, password: str = "") -> int:
-        text = StatementParserService._extract_pdf_text(
-            statement.file.path, password=password
+    def _import_smart_pdf(statement, password: str = "", save_password: bool = True):
+        text, tables, used_password = StatementParserService._extract_pdf_content(
+            statement, password=password
         )
         if not text.strip():
             raise StatementParseError(
@@ -105,16 +107,19 @@ class StatementParserService:
             )
 
         try:
-            parsed = detect_and_parse(text)
+            parsed = detect_and_parse(text, tables=tables)
         except ValueError as exc:
             # Fall back to table extraction when an account was already chosen.
             if statement.account_id:
                 df = StatementParserService._read_pdf(
-                    statement.file.path, password=password
+                    statement.file.path, password=used_password
                 )
                 df.columns = [str(c).strip() for c in df.columns]
                 mapping = StatementParserService._resolve_mapping(df.columns.tolist())
-                return StatementParserService._import_rows(statement, df, mapping)
+                return (
+                    StatementParserService._import_rows(statement, df, mapping),
+                    used_password,
+                )
             raise StatementParseError(str(exc)) from exc
 
         # Prefer the account the user picked; otherwise detect/create from the PDF.
@@ -124,7 +129,82 @@ class StatementParserService:
             )
             statement.save(update_fields=["account"])
 
-        return StatementParserService._import_parsed_txns(statement, parsed)
+        if save_password and used_password and statement.account_id:
+            from accounts.services import AccountService
+
+            AccountService.set_statement_password(statement.account, used_password)
+
+        imported = StatementParserService._import_parsed_txns(statement, parsed)
+        return imported, used_password
+
+    @staticmethod
+    def _password_candidates(statement, password: str = "") -> list[str]:
+        """Ordered unique passwords to try: provided → selected account → all saved."""
+        from accounts.models import Account
+        from accounts.services import AccountService
+
+        candidates: list[str] = []
+        if password:
+            candidates.append(password)
+
+        if statement.account_id and statement.account:
+            saved = AccountService.get_statement_password(statement.account)
+            if saved:
+                candidates.append(saved)
+
+        for acc in Account.objects.filter(user=statement.user, is_active=True):
+            saved = AccountService.get_statement_password(acc)
+            if saved:
+                candidates.append(saved)
+
+        candidates.append("")  # unencrypted PDFs
+        # Preserve order, drop empties except the intentional trailing ""
+        seen = set()
+        ordered: list[str] = []
+        for pw in candidates:
+            key = pw  # empty string once at end is fine
+            if key in seen and key != "":
+                continue
+            if key == "" and "" in seen:
+                continue
+            seen.add(key)
+            ordered.append(pw)
+        return ordered
+
+    @staticmethod
+    def _extract_pdf_content(statement, password: str = ""):
+        try:
+            import pdfplumber
+        except ImportError as exc:
+            raise StatementParseError(
+                "PDF statements are not supported on this server."
+            ) from exc
+
+        path = statement.file.path
+        last_error = None
+        for candidate in StatementParserService._password_candidates(
+            statement, password
+        ):
+            open_kwargs = {"password": candidate} if candidate else {}
+            try:
+                with pdfplumber.open(path, **open_kwargs) as pdf:
+                    text = "\n".join(
+                        (page.extract_text() or "") for page in pdf.pages
+                    )
+                    tables = []
+                    for page in pdf.pages:
+                        tables.extend(page.extract_tables() or [])
+                return text, tables, candidate
+            except Exception as exc:
+                last_error = exc
+                if StatementParserService._looks_like_password_error(str(exc)):
+                    continue
+                raise
+
+        raise StatementParseError(
+            "This PDF is password-protected. Enter the statement password "
+            "and try again."
+        ) from last_error
 
     @staticmethod
     def resolve_or_create_account(user, parsed):
@@ -213,7 +293,7 @@ class StatementParserService:
                             f"stmt_{statement.id}_{parsed.parser_id}_{txn.serial}"
                         ),
                         "payment_method": "upi"
-                        if txn.description.upper().startswith("UPI/")
+                        if "UPI" in txn.description.upper()[:8]
                         else "net_banking",
                     },
                 )
@@ -222,6 +302,13 @@ class StatementParserService:
 
     @staticmethod
     def _extract_pdf_text(path, password: str = "") -> str:
+        text, _tables, _pw = StatementParserService._extract_pdf_content_path(
+            path, password
+        )
+        return text
+
+    @staticmethod
+    def _extract_pdf_content_path(path, password: str = ""):
         try:
             import pdfplumber
         except ImportError as exc:
@@ -232,7 +319,11 @@ class StatementParserService:
         open_kwargs = {"password": password} if password else {}
         try:
             with pdfplumber.open(path, **open_kwargs) as pdf:
-                return "\n".join((page.extract_text() or "") for page in pdf.pages)
+                text = "\n".join((page.extract_text() or "") for page in pdf.pages)
+                tables = []
+                for page in pdf.pages:
+                    tables.extend(page.extract_tables() or [])
+            return text, tables, password
         except Exception as exc:
             if StatementParserService._looks_like_password_error(str(exc)):
                 raise StatementParseError(
