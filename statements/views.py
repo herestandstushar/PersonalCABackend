@@ -21,12 +21,15 @@ class StatementViewSet(ModelViewSet):
         return Statement.objects.filter(user=self.request.user).select_related("account")
 
     def perform_create(self, serializer):
-        # Save statement and get filename
-        file = self.request.data.get('file')
+        # Password unlocks encrypted PDFs and is never persisted.
+        password = serializer.validated_data.pop("password", "") or ""
+        file = self.request.data.get("file")
         statement = serializer.save(user=self.request.user, filename=file.name)
-        
-        # In a real production app, we'd use Celery.
-        # For this demo MVP without configuring a Celery worker, we can spawn a simple thread
-        thread = threading.Thread(target=StatementParserService.parse_and_import, args=(statement.id,))
+
+        # MVP: parse in a background thread (Celery in production).
+        thread = threading.Thread(
+            target=StatementParserService.parse_and_import,
+            args=(statement.id, password),
+        )
         thread.daemon = True
         thread.start()

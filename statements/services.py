@@ -42,13 +42,13 @@ class StatementParseError(Exception):
 
 class StatementParserService:
     @staticmethod
-    def parse_and_import(statement_id):
+    def parse_and_import(statement_id, password: str = ""):
         statement = Statement.objects.get(id=statement_id)
         statement.status = StatementStatus.PROCESSING
         statement.save(update_fields=["status"])
 
         try:
-            df = StatementParserService._read_file(statement)
+            df = StatementParserService._read_file(statement, password=password)
             df.columns = [str(c).strip() for c in df.columns]
 
             mapping = StatementParserService._resolve_mapping(df.columns.tolist())
@@ -65,7 +65,13 @@ class StatementParserService:
             statement.error_message = ""
         except Exception as exc:
             statement.status = StatementStatus.FAILED
-            statement.error_message = str(exc)[:500]
+            message = str(exc)
+            if StatementParserService._looks_like_password_error(message):
+                message = (
+                    "This PDF is password-protected. Enter the statement password "
+                    "and try again."
+                )
+            statement.error_message = message[:500]
 
         statement.save(
             update_fields=["status", "transactions_imported", "error_message"]
@@ -75,14 +81,26 @@ class StatementParserService:
     # ---- reading ----
 
     @staticmethod
-    def _read_file(statement):
+    def _looks_like_password_error(message: str) -> bool:
+        lowered = message.lower()
+        needles = (
+            "password",
+            "encrypted",
+            "decrypt",
+            "file has not been decrypted",
+            "incorrect password",
+        )
+        return any(n in lowered for n in needles)
+
+    @staticmethod
+    def _read_file(statement, password: str = ""):
         name = (statement.filename or statement.file.name).lower()
         path = statement.file.path
 
         if name.endswith((".xlsx", ".xls")):
             return pd.read_excel(path)
         if name.endswith(".pdf"):
-            return StatementParserService._read_pdf(path)
+            return StatementParserService._read_pdf(path, password=password)
         # Tolerate the stray encodings banks emit for CSV exports.
         for encoding in ("utf-8", "utf-8-sig", "latin-1"):
             try:
@@ -92,7 +110,7 @@ class StatementParserService:
         raise StatementParseError("Could not decode the file; try exporting it as UTF-8 CSV.")
 
     @staticmethod
-    def _read_pdf(path):
+    def _read_pdf(path, password: str = ""):
         try:
             import pdfplumber
         except ImportError:
@@ -100,8 +118,22 @@ class StatementParserService:
                 "PDF statements are not supported on this server. Export as CSV instead."
             )
 
+        open_kwargs = {}
+        if password:
+            open_kwargs["password"] = password
+
+        try:
+            pdf_ctx = pdfplumber.open(path, **open_kwargs)
+        except Exception as exc:
+            if StatementParserService._looks_like_password_error(str(exc)):
+                raise StatementParseError(
+                    "This PDF is password-protected. Enter the statement password "
+                    "and try again."
+                ) from exc
+            raise
+
         rows, header = [], None
-        with pdfplumber.open(path) as pdf:
+        with pdf_ctx as pdf:
             for page in pdf.pages:
                 for table in page.extract_tables() or []:
                     if not table:

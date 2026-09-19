@@ -79,11 +79,31 @@ class AccountCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ["id"]
 
     def validate(self, attrs):
-        if attrs.get("account_type") == AccountType.CREDIT_CARD:
-            if not attrs.get("credit_limit"):
-                raise serializers.ValidationError(
-                    {"credit_limit": "Credit limit is required for credit cards."}
-                )
+        account_type = attrs.get("account_type")
+        credit_limit = attrs.get("credit_limit")
+        # On PATCH, fall back to the existing row so partial updates don't fail.
+        if self.instance is not None:
+            account_type = account_type or self.instance.account_type
+            if credit_limit is None:
+                credit_limit = self.instance.credit_limit
+
+        if account_type == AccountType.CREDIT_CARD and not credit_limit:
+            raise serializers.ValidationError(
+                {"credit_limit": "Credit limit is required for credit cards."}
+            )
+
+        balance = attrs.get("current_balance")
+        if (
+            account_type == AccountType.CREDIT_CARD
+            and balance is not None
+            and credit_limit is not None
+            and balance > credit_limit
+        ):
+            raise serializers.ValidationError(
+                {
+                    "current_balance": "Outstanding usage cannot exceed the credit limit."
+                }
+            )
         return attrs
 
 
