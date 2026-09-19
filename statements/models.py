@@ -24,6 +24,9 @@ class Statement(BaseModel):
         "accounts.Account",
         on_delete=models.CASCADE,
         related_name="statements",
+        null=True,
+        blank=True,
+        help_text="Filled automatically when a smart PDF import detects/creates the account.",
     )
     file = models.FileField(upload_to="statements/%Y/%m/")
     filename = models.CharField(max_length=255)

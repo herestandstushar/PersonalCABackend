@@ -1,23 +1,43 @@
 from rest_framework import serializers
-from statements.models import Statement, StatementMappingRule
+
+from accounts.models import Account
 from accounts.serializers import AccountSerializer
+from statements.models import Statement, StatementMappingRule
+
 
 class StatementMappingRuleSerializer(serializers.ModelSerializer):
     class Meta:
         model = StatementMappingRule
-        fields = '__all__'
+        fields = "__all__"
+
 
 class StatementSerializer(serializers.ModelSerializer):
     account_detail = AccountSerializer(source="account", read_only=True)
-    
+
     class Meta:
         model = Statement
         fields = [
-            "id", "account", "account_detail", "file", "filename",
-            "status", "error_message", "transactions_imported",
-            "month", "year", "created_at"
+            "id",
+            "account",
+            "account_detail",
+            "file",
+            "filename",
+            "status",
+            "error_message",
+            "transactions_imported",
+            "month",
+            "year",
+            "created_at",
         ]
-        read_only_fields = ["id", "status", "error_message", "transactions_imported", "created_at", "filename"]
+        read_only_fields = [
+            "id",
+            "status",
+            "error_message",
+            "transactions_imported",
+            "created_at",
+            "filename",
+        ]
+
 
 class StatementCreateSerializer(serializers.ModelSerializer):
     # Write-only: used to unlock password-protected PDFs, never stored.
@@ -27,13 +47,54 @@ class StatementCreateSerializer(serializers.ModelSerializer):
         write_only=True,
         help_text="Password for encrypted PDF statements.",
     )
+    account = serializers.PrimaryKeyRelatedField(
+        queryset=Account.objects.none(),
+        required=False,
+        allow_null=True,
+        help_text="Optional for smart PDF imports — auto-detected/created from the file.",
+    )
 
     class Meta:
         model = Statement
         fields = [
-            "id", "account", "file", "month", "year", "password",
-            "status", "filename", "transactions_imported", "error_message",
+            "id",
+            "account",
+            "file",
+            "month",
+            "year",
+            "password",
+            "status",
+            "filename",
+            "transactions_imported",
+            "error_message",
         ]
         read_only_fields = [
-            "id", "status", "filename", "transactions_imported", "error_message",
+            "id",
+            "status",
+            "filename",
+            "transactions_imported",
+            "error_message",
         ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get("request")
+        if request and getattr(request, "user", None):
+            self.fields["account"].queryset = Account.objects.filter(
+                user=request.user, is_active=True
+            )
+
+    def validate(self, attrs):
+        upload = attrs.get("file")
+        account = attrs.get("account")
+        name = (getattr(upload, "name", "") or "").lower()
+        if not account and not name.endswith(".pdf"):
+            raise serializers.ValidationError(
+                {
+                    "account": (
+                        "Select an account for CSV/Excel uploads. "
+                        "PDFs can auto-detect the bank account."
+                    )
+                }
+            )
+        return attrs

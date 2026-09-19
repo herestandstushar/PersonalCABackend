@@ -1,11 +1,9 @@
 """
-Statement ingestion: reads CSV/Excel/PDF exports and turns rows into
-transactions.
+Statement ingestion: CSV/Excel/PDF → transactions.
 
-Banks rarely agree on column names, so parsing runs in two stages: an explicit
-`StatementMappingRule` is used when one matches the file's headers, and
-otherwise the columns are inferred from common header keywords. That keeps
-imports working for banks nobody has configured a template for.
+PDF flow prefers bank-specific text parsers (ICICI, …) that also extract
+bank/account metadata so we can auto-create the FinSight account when needed.
+Generic table extraction remains as a fallback when an account is already chosen.
 """
 
 import re
@@ -15,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 import pandas as pd
 from django.db import transaction as db_transaction
 
+from statements.bank_parsers import detect_and_parse
 from statements.models import Statement, StatementStatus, StatementMappingRule
 from transactions.models import TransactionType, TransactionSource
 from transactions.services import TransactionService
@@ -43,21 +42,31 @@ class StatementParseError(Exception):
 class StatementParserService:
     @staticmethod
     def parse_and_import(statement_id, password: str = ""):
-        statement = Statement.objects.get(id=statement_id)
+        statement = Statement.objects.select_related("account", "user").get(
+            id=statement_id
+        )
         statement.status = StatementStatus.PROCESSING
         statement.save(update_fields=["status"])
 
         try:
-            df = StatementParserService._read_file(statement, password=password)
-            df.columns = [str(c).strip() for c in df.columns]
-
-            mapping = StatementParserService._resolve_mapping(df.columns.tolist())
-            imported = StatementParserService._import_rows(statement, df, mapping)
+            name = (statement.filename or statement.file.name).lower()
+            if name.endswith(".pdf"):
+                imported = StatementParserService._import_smart_pdf(
+                    statement, password=password
+                )
+            else:
+                df = StatementParserService._read_file(statement, password=password)
+                df.columns = [str(c).strip() for c in df.columns]
+                if statement.account_id is None:
+                    raise StatementParseError(
+                        "Select an account for CSV/Excel imports."
+                    )
+                mapping = StatementParserService._resolve_mapping(df.columns.tolist())
+                imported = StatementParserService._import_rows(statement, df, mapping)
 
             if imported == 0:
                 raise StatementParseError(
-                    "No transactions could be read from this file. Check that it "
-                    "contains date, description and amount columns."
+                    "No transactions could be read from this file."
                 )
 
             statement.status = StatementStatus.COMPLETED
@@ -74,11 +83,165 @@ class StatementParserService:
             statement.error_message = message[:500]
 
         statement.save(
-            update_fields=["status", "transactions_imported", "error_message"]
+            update_fields=[
+                "status",
+                "transactions_imported",
+                "error_message",
+                "account",
+            ]
         )
         return statement.status == StatementStatus.COMPLETED
 
-    # ---- reading ----
+    # ---- smart PDF ----
+
+    @staticmethod
+    def _import_smart_pdf(statement, password: str = "") -> int:
+        text = StatementParserService._extract_pdf_text(
+            statement.file.path, password=password
+        )
+        if not text.strip():
+            raise StatementParseError(
+                "Could not read text from this PDF. Try exporting CSV from your bank."
+            )
+
+        try:
+            parsed = detect_and_parse(text)
+        except ValueError as exc:
+            # Fall back to table extraction when an account was already chosen.
+            if statement.account_id:
+                df = StatementParserService._read_pdf(
+                    statement.file.path, password=password
+                )
+                df.columns = [str(c).strip() for c in df.columns]
+                mapping = StatementParserService._resolve_mapping(df.columns.tolist())
+                return StatementParserService._import_rows(statement, df, mapping)
+            raise StatementParseError(str(exc)) from exc
+
+        # Prefer the account the user picked; otherwise detect/create from the PDF.
+        if not statement.account_id:
+            statement.account = StatementParserService.resolve_or_create_account(
+                statement.user, parsed
+            )
+            statement.save(update_fields=["account"])
+
+        return StatementParserService._import_parsed_txns(statement, parsed)
+
+    @staticmethod
+    def resolve_or_create_account(user, parsed):
+        from accounts.models import Account, AccountType
+        from accounts.services import AccountService
+        from core.utils import decrypt_field
+        from users.models import Currency
+
+        meta = parsed.meta
+        acct_no = (meta.account_number or "").strip()
+        bank = (meta.bank_name or "Bank").strip()
+        last4 = acct_no[-4:] if len(acct_no) >= 4 else acct_no
+
+        # Match an existing account by full/last-4 number or bank + last4 in name.
+        for acc in Account.objects.filter(user=user, is_active=True):
+            if acct_no and acc.account_number_encrypted:
+                try:
+                    decrypted = decrypt_field(acc.account_number_encrypted)
+                    if decrypted == acct_no or (
+                        last4 and decrypted.endswith(last4)
+                    ):
+                        return acc
+                except Exception:
+                    pass
+            if (
+                bank
+                and last4
+                and bank.lower() in (acc.bank_name or acc.name or "").lower()
+                and last4 in (acc.name or "")
+            ):
+                return acc
+
+        currency = None
+        if meta.currency_code:
+            currency = Currency.objects.filter(code=meta.currency_code.upper()).first()
+        if currency is None:
+            currency = user.default_currency or Currency.objects.filter(code="INR").first()
+        if currency is None:
+            currency = Currency.objects.filter(code="USD").first()
+
+        # Opening balance = balance before the first imported txn.
+        opening = Decimal("0.00")
+        if parsed.transactions:
+            first = parsed.transactions[0]
+            if first.txn_type == "expense":
+                opening = first.balance + first.amount
+            else:
+                opening = first.balance - first.amount
+
+        name = f"{bank} ····{last4}" if last4 else bank
+        return AccountService.create_account(
+            user,
+            {
+                "name": name[:200],
+                "account_type": AccountType.BANK_ACCOUNT,
+                "bank_name": bank[:200],
+                "account_number": acct_no,
+                "currency": currency,
+                "current_balance": opening,
+                "notes": f"Auto-created from statement import"
+                + (f" ({meta.period_label})" if meta.period_label else ""),
+            },
+        )
+
+    @staticmethod
+    def _import_parsed_txns(statement, parsed) -> int:
+        imported = 0
+        with db_transaction.atomic():
+            for txn in parsed.transactions:
+                txn_type = (
+                    TransactionType.INCOME
+                    if txn.txn_type == "income"
+                    else TransactionType.EXPENSE
+                )
+                TransactionService.create_transaction(
+                    statement.user,
+                    {
+                        "account": statement.account,
+                        "transaction_type": txn_type,
+                        "amount": txn.amount,
+                        "date": txn.date,
+                        "description": txn.description,
+                        "merchant_name": txn.merchant_name or txn.description[:100],
+                        "source": TransactionSource.STATEMENT_IMPORT,
+                        "statement_reference": (
+                            f"stmt_{statement.id}_{parsed.parser_id}_{txn.serial}"
+                        ),
+                        "payment_method": "upi"
+                        if txn.description.upper().startswith("UPI/")
+                        else "net_banking",
+                    },
+                )
+                imported += 1
+        return imported
+
+    @staticmethod
+    def _extract_pdf_text(path, password: str = "") -> str:
+        try:
+            import pdfplumber
+        except ImportError as exc:
+            raise StatementParseError(
+                "PDF statements are not supported on this server."
+            ) from exc
+
+        open_kwargs = {"password": password} if password else {}
+        try:
+            with pdfplumber.open(path, **open_kwargs) as pdf:
+                return "\n".join((page.extract_text() or "") for page in pdf.pages)
+        except Exception as exc:
+            if StatementParserService._looks_like_password_error(str(exc)):
+                raise StatementParseError(
+                    "This PDF is password-protected. Enter the statement password "
+                    "and try again."
+                ) from exc
+            raise
+
+    # ---- reading helpers ----
 
     @staticmethod
     def _looks_like_password_error(message: str) -> bool:
@@ -101,13 +264,14 @@ class StatementParserService:
             return pd.read_excel(path)
         if name.endswith(".pdf"):
             return StatementParserService._read_pdf(path, password=password)
-        # Tolerate the stray encodings banks emit for CSV exports.
         for encoding in ("utf-8", "utf-8-sig", "latin-1"):
             try:
                 return pd.read_csv(path, encoding=encoding)
             except UnicodeDecodeError:
                 continue
-        raise StatementParseError("Could not decode the file; try exporting it as UTF-8 CSV.")
+        raise StatementParseError(
+            "Could not decode the file; try exporting it as UTF-8 CSV."
+        )
 
     @staticmethod
     def _read_pdf(path, password: str = ""):
@@ -118,10 +282,7 @@ class StatementParserService:
                 "PDF statements are not supported on this server. Export as CSV instead."
             )
 
-        open_kwargs = {}
-        if password:
-            open_kwargs["password"] = password
-
+        open_kwargs = {"password": password} if password else {}
         try:
             pdf_ctx = pdfplumber.open(path, **open_kwargs)
         except Exception as exc:
@@ -170,7 +331,9 @@ class StatementParserService:
 
         mapping = {
             "date": StatementParserService._match_column(columns, DATE_HEADERS),
-            "description": StatementParserService._match_column(columns, DESCRIPTION_HEADERS),
+            "description": StatementParserService._match_column(
+                columns, DESCRIPTION_HEADERS
+            ),
             "amount": StatementParserService._match_column(columns, AMOUNT_HEADERS),
             "debit": StatementParserService._match_column(columns, DEBIT_HEADERS),
             "credit": StatementParserService._match_column(columns, CREDIT_HEADERS),
@@ -215,7 +378,7 @@ class StatementParserService:
                 return rule
         return None
 
-    # ---- row import ----
+    # ---- row import (generic tables) ----
 
     @staticmethod
     def _import_rows(statement, df, mapping):
@@ -226,9 +389,6 @@ class StatementParserService:
                 if not parsed:
                     continue
                 txn_date, description, amount, txn_type = parsed
-
-                # Category is left out on purpose: TransactionService
-                # auto-categorises from the merchant and description.
                 TransactionService.create_transaction(
                     statement.user,
                     {
@@ -247,15 +407,12 @@ class StatementParserService:
 
     @staticmethod
     def _parse_row(row, mapping):
-        """Returns (date, description, amount, type), or None for rows to skip."""
         raw_date = row.get(mapping["date"])
         if pd.isna(raw_date):
             return None
 
         txn_date = StatementParserService._parse_date(raw_date, mapping["date_format"])
         if not txn_date:
-            # Blank lines, subtotals and footers all fail here; skipping them is
-            # expected rather than an error.
             return None
 
         description = str(row.get(mapping["description"], "")).strip()
@@ -322,7 +479,6 @@ class StatementParserService:
         amount = StatementParserService._to_decimal(row.get(mapping["amount"]))
         if amount is None:
             return None, None
-        # A single amount column encodes direction by sign.
         if amount > 0:
             return amount, TransactionType.INCOME
         return abs(amount), TransactionType.EXPENSE
