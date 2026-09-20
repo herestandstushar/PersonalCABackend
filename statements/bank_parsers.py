@@ -53,37 +53,58 @@ def _to_decimal(raw: str) -> Optional[Decimal]:
 # Shared bank identity helpers
 # ---------------------------------------------------------------------------
 
+def _hdfc_header_signals(text: str) -> bool:
+    """Strong HDFC statement-header markers (not UPI counterparty noise)."""
+    upper = text.upper()
+    head = upper[:4000]
+    return (
+        "RTGS/NEFT IFSC : HDFC" in upper
+        or "RTGS/NEFT IFSC: HDFC" in upper
+        or ("ACCOUNT BRANCH" in head and "HDFC BANK" in head)
+        or (
+            "STATEMENT FROM" in head
+            and "CLOSING BALANCE" in upper
+            and "HDFC BANK" in head
+        )
+    )
+
+
 def _looks_like_icici(text: str) -> bool:
     """True when the PDF itself is an ICICI statement (not just UPI mentions)."""
+    # HDFC statements often mention ICICI IFSC/UPI handles — never treat those as ICICI.
+    if _hdfc_header_signals(text):
+        return False
     upper = text.upper()
     return any(
         needle in upper
         for needle in (
             "ICICIBANK.COM",
             "TEAM ICICI BANK",
-            "ICIC000",  # ICICI IFSC prefix
             "SUMMARY OF ACCOUNTS HELD UNDER CUST ID",
             "STATEMENT OF TRANSACTIONS IN SAVINGS",
             "STATEMENT OF TRANSACTIONS IN CURRENT",
             "OPTRANSACTIONHISTORY",
             "JASPERREPORTS",
+            # ICICI multi-page footer IFSC column (not a stray UPI ICIC000…)
+            "IFSC CODE NAME OF NOMINEE",
         )
     )
 
 
 def _looks_like_hdfc(text: str) -> bool:
     """True for real HDFC statements — ignore counterparty 'HDFC BANK' in UPI lines."""
+    if _hdfc_header_signals(text):
+        return True
     if _looks_like_icici(text):
         return False
     upper = text.upper()
     return (
-        ("STATEMENT FROM" in upper and "HDFC" in upper)
+        ("STATEMENT FROM" in upper and "HDFC" in upper[:4000])
         or "RTGS/NEFT IFSC : HDFC" in upper
-        or ("ACCOUNT BRANCH" in upper and "HDFC BANK" in upper)
         or (
             "CLOSING BALANCE" in upper
-            and ("WITHDRAWAL AMT" in upper or "WITHDRAWAL" in upper)
-            and "HDFC" in upper
+            and ("WITHDRAWAL AMOUNT" in upper or "WITHDRAWAL AMT" in upper)
+            and "HDFC" in upper[:4000]
         )
     )
 
@@ -697,7 +718,7 @@ class HdfcStatementParser:
         return txns
 
 
-PARSERS = [IciciStatementParser, HdfcStatementParser]
+PARSERS = [HdfcStatementParser, IciciStatementParser]
 
 SUPPORTED_BANKS = "ICICI Bank, HDFC Bank"
 
