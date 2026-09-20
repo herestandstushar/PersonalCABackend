@@ -12,6 +12,23 @@ _render_host = env("RENDER_EXTERNAL_HOSTNAME", default="")  # noqa: F405
 if _render_host and _render_host not in ALLOWED_HOSTS:  # noqa: F405
     ALLOWED_HOSTS = list(ALLOWED_HOSTS) + [_render_host, ".onrender.com"]  # noqa: F405
 
+# Allow the production Vercel app + preview deployments even if the Render
+# env var lags behind a renamed project URL.
+_CORS_DEFAULTS = [
+    "https://personal-caui.vercel.app",
+    "https://finsight.vercel.app",
+]
+CORS_ALLOWED_ORIGINS = list(  # noqa: F405
+    dict.fromkeys([*CORS_ALLOWED_ORIGINS, *_CORS_DEFAULTS])  # noqa: F405
+)
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://[\w-]+\.vercel\.app$",
+    r"^https://[\w-]+-[\w-]+-[\w]+\.vercel\.app$",  # team preview URLs
+]
+CSRF_TRUSTED_ORIGINS = list(  # noqa: F405
+    dict.fromkeys([*CSRF_TRUSTED_ORIGINS, *CORS_ALLOWED_ORIGINS])  # noqa: F405
+)
+
 # Render (and most PaaS) terminate TLS at the proxy and forward HTTP internally.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_X_FORWARDED_HOST = True
