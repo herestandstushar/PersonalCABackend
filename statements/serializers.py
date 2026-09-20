@@ -86,20 +86,39 @@ class StatementCreateSerializer(serializers.ModelSerializer):
             "transactions_skipped",
             "error_message",
         ]
+        extra_kwargs = {
+            "account": {"required": False, "allow_null": True},
+        }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Multipart "auto-detect" uploads omit account — keep it optional always.
+        account_field = self.fields.get("account")
+        if account_field is not None:
+            account_field.required = False
+            account_field.allow_null = True
         request = self.context.get("request")
-        if request and getattr(request, "user", None):
-            self.fields["account"].queryset = Account.objects.filter(
+        if request and getattr(request, "user", None) and account_field is not None:
+            account_field.queryset = Account.objects.filter(
                 user=request.user, is_active=True
             )
+
+    def to_internal_value(self, data):
+        # FormData may send account="" for the placeholder option; treat as omitted.
+        if hasattr(data, "copy"):
+            data = data.copy()
+            raw = data.get("account")
+            if raw in ("", None, "null", "undefined"):
+                data.pop("account", None)
+        return super().to_internal_value(data)
 
     def validate(self, attrs):
         upload = attrs.get("file")
         account = attrs.get("account")
         name = (getattr(upload, "name", "") or "").lower()
-        if not account and not name.endswith(".pdf"):
+        content_type = (getattr(upload, "content_type", "") or "").lower()
+        is_pdf = name.endswith(".pdf") or "pdf" in content_type
+        if not account and not is_pdf:
             raise serializers.ValidationError(
                 {
                     "account": (
